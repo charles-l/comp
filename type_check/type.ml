@@ -12,7 +12,7 @@ string ::= '"' character* '"'
 type ltype =
     | NumberT
     | BoolT
-    | FunctionT of ltype * ltype list
+    | FunctionT of ltype list
     | UserT of string
 
 type sexp =
@@ -34,16 +34,10 @@ let ident = letter >>=
 (* don't have do notation, so this has to have a few inline lambda's *)
 let sym = ident |>> fun s -> Symbol s
 
-let ptype = ident |>> fun t -> match t with
-                                      | "number" -> NumberT
-                                      | "bool" -> BoolT
-                                      | ":" -> FunctionT (NumberT, [NumberT])
-                                      | _ -> UserT t
-
 let rec type_to_string t = match t with
                     | NumberT -> "number"
                     | BoolT -> "bool"
-                    | FunctionT (rtype, atypes) -> List.fold_left (fun s e -> s ^ "->" ^ (type_to_string e)) "" atypes
+                    | FunctionT atypes -> "(" ^ List.fold_left (fun s e -> s ^ " " ^ (type_to_string e)) "->" atypes ^ ")"
                     | UserT t -> t
 
 let number = many1_chars digit |>> fun n -> Number (int_of_string n)
@@ -53,6 +47,16 @@ let atom = sym <|> str <|> number
 let rec pairs_from_list l = match l with
   | [] -> Nil
   | head :: tail -> Pair(head, pairs_from_list(tail))
+
+
+let rec ptype =
+  let primtype t = match t with
+                  | "number" -> NumberT
+                  | "bool" -> BoolT
+                  | _ -> UserT t in
+    let ftype = (between (char '(') (char ')') (sep_by ident space)) |>>
+      fun l -> FunctionT (List.map primtype l) in
+      ftype <|> (ident |>> primtype)
 
 let def = string "def" >> spaces >> ident >>=
   fun name ->
@@ -90,8 +94,6 @@ let rec annotate_tree e tbl =
 
 let p e = print_string(e); print_newline();;
 
-p(parse "\"asdf\"");
-p(parse "\"\"");
-p(parse "blah");
-p(parse "31");
 p(parse "((def x : int) (print x))");
+p(parse "((def x : int) (print x))");
+p(parse "((def f : (int int)) (print x))");
