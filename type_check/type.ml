@@ -2,12 +2,18 @@ open MParser
 
 (*
 sexp ::= '(' definition | atom {sexp | atom}* ')'
-definition ::= define symbol : symbol
+definition ::= 'def' symbol : symbol
 atom ::= symbol | string | number
 symbol ::= letter { letter | number }*
 number ::= digit+
 string ::= '"' character* '"'
 *)
+
+type ltype =
+    | NumberT
+    | BoolT
+    | FunctionT of ltype * ltype list
+    | UserT of string
 
 type sexp =
     | Number of int
@@ -15,14 +21,30 @@ type sexp =
     | Pair of sexp * sexp
     | Symbol of string
     | String of string
-    | Define of sexp * sexp
+    | Define of string * ltype
+    | Function of sexp (* function has return value, arg types and body *)
 
 let str = char '"' >> many_chars (none_of "\"") << char '"' |>> (fun s -> String s)
 
 (* don't have do notation, so this has to have a few inline lambda's *)
-let sym = letter >>=
-  (fun f -> many_chars (letter <|> digit) >>=
-    fun r -> (return (Symbol (Char.escaped f ^ r))))
+let ident = letter >>=
+  (fun f -> many_chars (letter <|> digit) |>>
+    fun r -> Char.escaped f ^ r)
+
+(* don't have do notation, so this has to have a few inline lambda's *)
+let sym = ident |>> fun s -> Symbol s
+
+let ptype = ident |>> fun t -> match t with
+                                      | "number" -> NumberT
+                                      | "bool" -> BoolT
+                                      | ":" -> FunctionT (NumberT, [NumberT])
+                                      | _ -> UserT t
+
+let rec type_to_string t = match t with
+                    | NumberT -> "number"
+                    | BoolT -> "bool"
+                    | FunctionT (rtype, atypes) -> List.fold_left (fun s e -> s ^ "->" ^ (type_to_string e)) "" atypes
+                    | UserT t -> t
 
 let number = many1_chars digit |>> fun n -> Number (int_of_string n)
 
@@ -32,9 +54,9 @@ let rec pairs_from_list l = match l with
   | [] -> Nil
   | head :: tail -> Pair(head, pairs_from_list(tail))
 
-let def = string "def" >> spaces >> sym >>=
+let def = string "def" >> spaces >> ident >>=
   fun name ->
-    (spaces >> char ':' >> spaces >> sym |>>
+    (spaces >> char ':' >> spaces >> ptype |>>
       fun ty -> Define (name, ty))
 
 let rec sexp e = (atom <|> (between (char '(') (char ')') (def <|> ((sep_by sexp space) |>> pairs_from_list)))) e
@@ -45,7 +67,8 @@ let rec sexp_to_string e = match e with
                     | Number s -> string_of_int s
                     | Pair (a, b) -> "(" ^ (sexp_to_string a) ^ " . " ^ (sexp_to_string b) ^ ")"
                     | Nil -> "nil"
-                    | Define (n, t) -> sexp_to_string n ^ " : " ^ sexp_to_string t
+                    | Define (n, t) -> "[" ^ n ^ " : " ^ type_to_string t ^ "]"
+                    | Function body -> "(lambda (...) ...)"
 
 let parse (s: string) =
   match MParser.parse_string sexp s () with
@@ -53,10 +76,22 @@ let parse (s: string) =
     | Failed (msg, e) ->
         failwith msg ;;
 
+type node =
+  | Primitive of sexp
+  | Variable of ltype
+  | NPair of node * node
+
+let rec annotate_tree e tbl =
+  match e with
+  | Symbol s -> Variable (Hashtbl.find tbl s)
+  | Pair (a, b) -> NPair((annotate_tree a tbl), (annotate_tree b tbl))
+  | Define (n, t) -> (Hashtbl.add tbl n t; (Primitive Nil))
+  | _ -> Primitive e
+
 let p e = print_string(e); print_newline();;
 
 p(parse "\"asdf\"");
 p(parse "\"\"");
 p(parse "blah");
 p(parse "31");
-p(parse "(def x : int)");
+p(parse "((def x : int) (print x))");
