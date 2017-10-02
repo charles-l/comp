@@ -34,7 +34,15 @@ exception Unbound_variable of string
 exception Unknown_type of string
 exception Wrong_arg_num of int
 exception Wrong_type
-exception Type_mismatch of ltype * ltype
+exception Type_mismatch of string * string
+
+(* util *)
+
+let rec drop h n =
+  if n == 0 then h else (drop (match h with a::b -> b) (n-1))
+
+let rec take h n =
+  if n == 0 then [] else (match h with a::b -> a :: (take h (n - 1)))
 
 (* parsing *)
 
@@ -107,7 +115,7 @@ let check_prototype proto app tbl =
       | True -> BoolT
       | Nil -> BoolT
       | Symbol s -> Hashtbl.find tbl s in
-  let assert_same_type = fun pe ae -> if (pe != (arg_type ae)) then raise (Type_mismatch (pe, (arg_type ae))) in
+  let assert_same_type = fun pe ae -> if (pe != (arg_type ae)) then raise (Type_mismatch (type_to_string pe, type_to_string (arg_type ae))) in
   try
     List.map2 assert_same_type proto app
   with Invalid_argument _ -> raise (Wrong_arg_num (List.length app))
@@ -116,11 +124,10 @@ let lookup_t tbl s = (try
   Hashtbl.find tbl s
     with Not_found -> raise (Unbound_variable s))
 
-
 let annotate_exprs e tbl =
   let annotate_e e = match e with
-  | Application a -> check_prototype (match (lookup_t tbl a.fname) with
-                                                | FunctionT l -> l
+  | Application a -> check_prototype (match (lookup_t tbl a.fname) with (* drop the return value *)
+                                                | FunctionT l -> take l ((List.length l) - 1)
                                                 | _ -> raise Wrong_type) a.args tbl; e
   | Definition n -> Hashtbl.add tbl n.name n.ty; e
   | Primitive _ -> e in
@@ -135,7 +142,6 @@ let parse_and_annotate (s: string) =
 let p e = List.map (fun s -> print_string s; print_newline()) e;;
 
 p(parse "(def x : number)");
-p(parse "(def x : number)");
-p(parse "(def add : (number number number)) (add 1 2)");
-p(List.map sexp_to_string (parse_and_annotate "(def add : (number number number)) (add 1 2 2)"));
-p(List.map sexp_to_string (parse_and_annotate "(def add : (number number number)) (add 1 t 2)"));
+p(List.map sexp_to_string (parse_and_annotate "(def add : (number number number)) (def x : number) (add x 2) (add 1 2)"));
+p(List.map sexp_to_string (parse_and_annotate "(def add : (number number number)) (def b : bool) (add b 2)"));
+p(List.map sexp_to_string (parse_and_annotate "(def add : (number number number)) (add t 2)"));
