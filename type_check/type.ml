@@ -32,6 +32,7 @@ type ntype =
 
 exception Unbound_variable of string
 exception Unknown_type of string
+exception Wrong_arg_num of int
 exception Wrong_type
 exception Type_mismatch of ltype * ltype
 
@@ -79,6 +80,8 @@ let rec sexp e =
       Definition {name=n; ty=t}) in
   ((atom |>> fun l -> Primitive l) <|> (between (char '(') (char ')') (def <|> fcall))) e
 
+let sexp_list = sep_by sexp space
+
 let sexp_to_string s =
   let literal_to_string e = match e with
                     | String s -> "\"" ^ s ^ "\""
@@ -92,8 +95,8 @@ let sexp_to_string s =
     | Primitive l -> literal_to_string l
 
 let parse (s: string) =
-  match MParser.parse_string sexp s () with
-    | Success e -> sexp_to_string e
+  match MParser.parse_string sexp_list s () with
+    | Success e -> List.map sexp_to_string e
     | Failed (msg, e) ->
         failwith msg ;;
 
@@ -105,31 +108,34 @@ let check_prototype proto app tbl =
       | Nil -> BoolT
       | Symbol s -> Hashtbl.find tbl s in
   let assert_same_type = fun pe ae -> if (pe != (arg_type ae)) then raise (Type_mismatch (pe, (arg_type ae))) in
-  List.map2 assert_same_type proto app
+  try
+    List.map2 assert_same_type proto app
+  with Invalid_argument _ -> raise (Wrong_arg_num (List.length app))
 
 let lookup_t tbl s = (try
   Hashtbl.find tbl s
     with Not_found -> raise (Unbound_variable s))
 
 
-let annotate_tree e tbl =
-  match e with
+let annotate_exprs e tbl =
+  let annotate_e e = match e with
   | Application a -> check_prototype (match (lookup_t tbl a.fname) with
                                                 | FunctionT l -> l
                                                 | _ -> raise Wrong_type) a.args tbl; e
   | Definition n -> Hashtbl.add tbl n.name n.ty; e
-  | Primitive _ -> e
+  | Primitive _ -> e in
+  List.map annotate_e e
 
 let parse_and_annotate (s: string) =
-  match MParser.parse_string sexp s () with
-    | Success e -> annotate_tree e (Hashtbl.create 32)
+  match MParser.parse_string sexp_list s () with
+    | Success e -> annotate_exprs e (Hashtbl.create 32)
     | Failed (msg, e) ->
         failwith msg ;;
 
-let p e = print_string(e); print_newline();;
+let p e = List.map (fun s -> print_string s; print_newline()) e;;
 
 p(parse "(def x : number)");
 p(parse "(def x : number)");
 p(parse "(def add : (number number number)) (add 1 2)");
-p(sexp_to_string (parse_and_annotate "((def add : (int int int)) (add 1 2))"));
-p(sexp_to_string (parse_and_annotate "((def add : (int int int)) (add 1 t))"));
+p(List.map sexp_to_string (parse_and_annotate "(def add : (number number number)) (add 1 2 2)"));
+p(List.map sexp_to_string (parse_and_annotate "(def add : (number number number)) (add 1 t 2)"));
