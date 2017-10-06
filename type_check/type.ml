@@ -1,3 +1,4 @@
+open Llvm
 open MParser
 
 type ltype =
@@ -46,12 +47,12 @@ let rec take h n =
 
 (*
 ident ::= letter { letter | number }*
-sexp ::= '(' definition | atom {sexp | atom}* ')'
-definition ::= 'def' symbol : {symbol | (symbol ...)}
-atom ::= symbol | string | number
-symbol ::= letter { letter | number }*
-number ::= digit+
 string ::= '"' character* '"'
+symbol ::= ident
+number ::= digit+
+atom ::= symbol | string | number
+sexp ::= '(' definition | atom {sexp | atom}* ')'
+definition ::= 'def' symbol : {symbol | '(' symbol ... ')'}
 *)
 
 let ident = letter >>=
@@ -112,9 +113,14 @@ let sexp_to_string s =
 
 let parse (s: string) =
   match MParser.parse_string sexp_list s () with
-    | Success e -> List.map sexp_to_string e
+    | Success e -> e
     | Failed (msg, e) ->
         failwith msg ;;
+
+let lookup_t tbl s = (try
+  match Hashtbl.find tbl s with
+    | (ty, _) -> ty
+  with Not_found -> raise (Unbound_variable s))
 
 let check_prototype proto app tbl =
   let arg_type p = match p with
@@ -122,34 +128,43 @@ let check_prototype proto app tbl =
       | Number _ -> NumberT
       | True -> BoolT
       | Nil -> BoolT
-      | Symbol s -> Hashtbl.find tbl s in
+      | Symbol s -> lookup_t tbl s in
   let assert_same_type = fun pe ae -> if (pe != (arg_type ae)) then raise (Type_mismatch (type_to_string pe, type_to_string (arg_type ae))) in
   try
     List.iter2 assert_same_type proto app
   with Invalid_argument _ -> raise (Wrong_arg_num (List.length app))
 
-let lookup_t tbl s = (try
-  Hashtbl.find tbl s
-    with Not_found -> raise (Unbound_variable s))
+let context = global_context ()
+let the_module = create_module context "my jit"
+let builder = builder context
+let named_values:(string, (ltype * llvalue)) Hashtbl.t = Hashtbl.create 32
+let i32_type = i32_type context
+let i1_type = i1_type context
 
-let check_exprs e tbl =
-  let check_e = function
-  | Application {fname; args} -> check_prototype (match (lookup_t tbl fname) with (* drop the return value *)
-                                                | FunctionT l -> take l ((List.length l) - 1)
-                                                | _ -> raise Wrong_type) args tbl
-  | Definition {name; ty} -> Hashtbl.add tbl name ty
-  | Primitive _ -> () in
-  List.iter check_e e
-
-let parse_and_annotate (s: string) =
-  match MParser.parse_string sexp_list s () with
-    | Success e -> check_exprs e (Hashtbl.create 32); e
-    | Failed (msg, e) ->
-        failwith msg ;;
+let rec emit tbl e =
+  let emit_expr = function
+    | Number i -> const_int i32_type i
+    | True -> const_int i1_type 1
+    | Nil -> const_int i1_type 0
+    | Symbol s | String s -> const_string context s
+  in
+  let track_def = function
+    | Definition {name; ty} -> Hashtbl.add tbl name (ty, const_int i32_type 0)
+  in
+  let emit_app = function
+    | Application {fname; args} -> check_prototype (match (lookup_t tbl fname) with (* drop the return value *)
+                                                    | FunctionT l -> take l ((List.length l) - 1)
+                                                    | _ -> raise Wrong_type) args tbl
+  in
+  match e with
+    | [] -> []
+    | h :: t -> (match h with
+      | Primitive p -> emit tbl t @ [emit_expr p]
+      | Definition _ as d -> track_def d; emit tbl t
+      | Application _ as a -> emit_app a; emit tbl t)
 
 let p e = List.iter (fun s -> print_string s; print_newline()) e;;
 
-p(parse "(def x : number)");
-p(List.map sexp_to_string (parse_and_annotate "(def add : (number number number)) (def x : number) (add x 2) (add 1 2)"));
-p(List.map sexp_to_string (parse_and_annotate "(def add : (number number number)) (def b : bool) (add b 2)"));
-p(List.map sexp_to_string (parse_and_annotate "(def add : (number number number)) (add t 2)"));
+p(List.map sexp_to_string (parse "(def x : number)"));
+
+List.iter dump_value (emit named_values (parse "(def x : number) 2 t nil symbol \"blah blah blah\""))

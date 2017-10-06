@@ -1,5 +1,5 @@
 all:
-	ocamlfind ocamlc -g -o type -linkpkg -package mparser type.ml
+	ocamlfind ocamlc -g -o type -linkpkg -package mparser -linkpkg -package llvm type.ml
 
 watch:
-	ls *.ml | entr make
+	ls *.ml | entr sh -c 'make && ./type'
