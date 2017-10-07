@@ -1,5 +1,8 @@
 all:
-	ocamlfind ocamlc -g -o type -linkpkg -package mparser -linkpkg -package llvm type.ml
+	ocamlfind ocamlc -g -o type -linkpkg -package mparser -linkpkg -package llvm -linkpkg -package llvm.analysis type.ml
 
 watch:
 	ls *.ml | entr sh -c 'make && ./type'
+
+debug:
+	ocamldebug `ocamlfind query -recursive -i-format llvm` type
