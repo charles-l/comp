@@ -88,7 +88,7 @@ let rec sexp e =
     (spaces >> (sep_by sexp space) |>> fun l -> Sexp ((Primitive (Symbol f)) :: l)) in
   let def = string "def" >> spaces >> ident >>= fun n ->
     (spaces >> char ':' >> spaces >> ptype |>> fun t ->
-      Definition {name=n; ty=t}) in
+      Declaration {name=n; ty=t}) in
   ((atom |>> fun l -> Primitive l) <|> (between (char '(') (char ')') (def <|> fcall))) e
 
 let sexp_list = sep_by sexp space
@@ -101,7 +101,7 @@ let rec sexp_to_string s =
                     | Symbol s -> "'" ^ s
                     | Number s -> string_of_int s in
   match s with
-    | Definition {name; ty} -> "(" ^ name ^ " : " ^ type_to_string ty ^ ")"
+    | Declaration {name; ty} -> "(" ^ name ^ " : " ^ type_to_string ty ^ ")"
     | Sexp l -> "(" ^ (String.concat " " (List.map sexp_to_string l)) ^ ")"
     | Primitive l -> literal_to_string l
 
@@ -168,8 +168,8 @@ let rec emit e =
     | [] -> []
     | h :: t -> (match h with
       | Primitive p -> emit t @ [emit_expr p]
-      | Definition {name; ty = FunctionT fp} -> emit t @ [emit_fundef name fp]
-      | Definition {name; ty = _ as vty} -> defvar name vty; emit t
+      | Declaration {name; ty = FunctionT fp} -> emit t @ [emit_fundef name fp]
+      | Declaration {name; ty = _ as vty} -> defvar name vty; emit t
       | Sexp _ as a -> emit t @ [emit_app a])
 
 let t = parse "(def fun : ((thebool bool) (aname string) bool)) (fun t \"a\"))" ;;
