@@ -18,7 +18,7 @@ type literal =
 
 type ntype =
   | Declaration of binding
-  | Definition of binding * llvalue
+  | Definition of binding * ntype
   | Sexp of ntype list
   | Primitive of literal
 
@@ -87,8 +87,8 @@ let rec sexp e =
   let fcall = ident >>= fun f ->
     (spaces >> (sep_by sexp space) |>> fun l -> Sexp ((Primitive (Symbol f)) :: l)) in
   let def = string "def" >> spaces >> ident >>= fun n ->
-    (spaces >> char ':' >> spaces >> ptype |>> fun t ->
-      Declaration {name=n; ty=t}) in
+    (spaces >> char ':' >> spaces >> ptype >>= fun t ->
+      spaces >>? (sexp |>> fun body -> Definition ({name=n; ty=t}, body)) <|> return (Declaration {name=n; ty=t})) in
   ((atom |>> fun l -> Primitive l) <|> (between (char '(') (char ')') (def <|> fcall))) e
 
 let sexp_list = sep_by sexp space
@@ -102,6 +102,8 @@ let rec sexp_to_string s =
                     | Number s -> string_of_int s in
   match s with
     | Declaration {name; ty} -> "(" ^ name ^ " : " ^ type_to_string ty ^ ")"
+    | Definition (def, body) -> let s = sexp_to_string (Declaration def) in
+                                String.sub s 0 ((String.length s) - 1) ^ " ...)"
     | Sexp l -> "(" ^ (String.concat " " (List.map sexp_to_string l)) ^ ")"
     | Primitive l -> literal_to_string l
 
@@ -170,9 +172,11 @@ let rec emit e =
       | Primitive p -> emit t @ [emit_expr p]
       | Declaration {name; ty = FunctionT fp} -> emit t @ [emit_fundef name fp]
       | Declaration {name; ty = _ as vty} -> defvar name vty; emit t
+      (*| Definition (def, body) -> emit*)
       | Sexp _ as a -> emit t @ [emit_app a])
 
-let t = parse "(def fun : ((thebool bool) (aname string) bool)) (fun t \"a\"))" ;;
+let t = parse "(def fun : ((thebool bool) (aname string) bool)
+                (fun t \"a\")))" ;;
 List.iter print_endline (List.map sexp_to_string t)
 let c = emit t;;
 Llvm_analysis.assert_valid_module the_module;
