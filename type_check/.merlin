@@ -1,1 +1,1 @@
-PKG mparser core llvm
+PKG mparser core llvm llvm.analysis llvm.executionengine llvm.target llvm.scalar_opts

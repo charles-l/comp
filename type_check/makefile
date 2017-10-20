@@ -1,5 +1,12 @@
+PACKAGES="mparser \
+		 llvm \
+		 llvm.analysis \
+		 llvm.executionengine \
+		 llvm.target \
+		 llvm.scalar_opts"
+
 all:
-	ocamlfind ocamlc -g -o type -linkpkg -package mparser -linkpkg -package llvm -linkpkg -package llvm.analysis -linkpkg type.ml
+	ocamlfind ocamlc -g -o type type.ml -linkpkg -package $(PACKAGES)
 
 watch:
 	ls *.ml | entr sh -c 'make && ./type'

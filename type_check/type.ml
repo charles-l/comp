@@ -1,4 +1,7 @@
 open Llvm
+open Llvm_executionengine
+open Llvm_target
+open Llvm_scalar_opts
 open MParser
 
 type ltype =
@@ -129,7 +132,7 @@ let rec lty_to_llvmty = function
   | StringT -> pointer_type (i8_type context)
   | FunctionT l -> function_type (lty_to_llvmty l.retty) (Array.of_list (List.map (fun b -> lty_to_llvmty b.ty) l.args))
 
-let rec emit =
+let rec emit fpm =
   let emit_expr = function
     | True -> const_int (lty_to_llvmty BoolT) 1
     | Nil -> const_int (lty_to_llvmty BoolT) 0
@@ -152,9 +155,10 @@ let rec emit =
       position_at_end bb builder;
 
       try
-        let ret_val = emit (get body) in
+        let ret_val = emit fpm (get body) in
         let _ = build_ret ret_val builder in
         Llvm_analysis.assert_valid_function f;
+        let _ = PassManager.run_function f fpm in
         f
       with e ->
         delete_function f;
@@ -171,7 +175,7 @@ let rec emit =
         let got_n = List.length args in
         if expect_n == got_n then () else
           raise (Error ("wrong number of args passed (expected " ^ (string_of_int expect_n) ^ " but got " ^ (string_of_int got_n) ^ ")"));
-        let args = Array.of_list (List.map emit args) in
+        let args = Array.of_list (List.map (emit fpm) args) in
         build_call f args "calltmp" builder
     | _ -> raise (Error "cannot apply function")
         in
@@ -181,10 +185,25 @@ let rec emit =
     | Declaration {name; ty = _ as vty} -> defvar name vty; emit_expr Nil
     | Definition ({name; ty = FunctionT fp}, value) -> emit_fundef ~body:(Some value) name fp
     | Sexp a -> emit_app a
+    | _ -> raise (Error "Failed to emit expression") ;;
 
-let t = parse "(def fun : ((thebool bool) bool)
-                (fun t))" ;;
-List.iter print_endline (List.map sexp_to_string t)
-let c = List.map emit t;;
-Llvm_analysis.assert_valid_module the_module;
-List.iter dump_value c
+initialize () ;; (* initialize the execution engine *)
+let exec_engine = create the_module ;;
+let fpm = PassManager.create_function the_module ;;
+ignore (PassManager.initialize fpm);;
+
+let s = parse "(def fun : ((thebool bool) bool)
+                nil)" ;;
+let c = List.map (emit fpm) s;;
+
+let _ = PassManager.run_function (List.hd c) fpm ;;
+
+open Ctypes ;;
+open Foreign ;;
+
+let a = get_function_address "fun" (funptr (bool @-> (returning bool))) exec_engine ;;
+
+if (a true) then
+  print_endline "SUCCESS"
+else
+  print_endline "FAIL"
