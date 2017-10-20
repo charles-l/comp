@@ -23,6 +23,7 @@ type ntype =
   | Primitive of literal
 
 exception Error of string
+exception No_value
 
 (* util *)
 
@@ -40,6 +41,10 @@ let rec take n h =
     match h with
     | [] -> []
     | h::t -> h :: (take (n - 1) t)
+
+let get = function
+  | None -> raise No_value
+  | Some v -> v
 
 (* parsing *)
 
@@ -124,36 +129,40 @@ let rec lty_to_llvmty = function
   | StringT -> pointer_type (i8_type context)
   | FunctionT l -> function_type (lty_to_llvmty l.retty) (Array.of_list (List.map (fun b -> lty_to_llvmty b.ty) l.args))
 
-let rec emit e =
+let rec emit =
   let emit_expr = function
     | True -> const_int (lty_to_llvmty BoolT) 1
     | Nil -> const_int (lty_to_llvmty BoolT) 0
     | Number v -> const_int (lty_to_llvmty NumberT) v
-    | Symbol v | String v -> const_stringz context v in
+    | Symbol v -> (try (match Hashtbl.find named_values v with
+                   | (t, v) -> v)
+                  with e -> raise (Error ("couldn't find " ^ v)))
+    | String v -> const_stringz context v in
   let defvar name ty = Hashtbl.add named_values name (ty, const_int (lty_to_llvmty NumberT) 0) in
-  let emit_fundef name fp =
+  let emit_fundef ?(body = None) name fp =
     Hashtbl.clear named_values;
     let f = declare_function name (lty_to_llvmty (FunctionT fp)) the_module in
-    Array.iteri(fun i a ->
-      let n = List.nth fp.args i in
-      set_value_name n.name a;
-      Hashtbl.add named_values n.name (n.ty, a)
-    ) (params f);
-    let bb = append_block context "entry" f in
-    position_at_end bb builder;
+    if body != None then
+      (Array.iteri(fun i a ->
+        let n = List.nth fp.args i in
+        set_value_name n.name a;
+        Hashtbl.add named_values n.name (n.ty, a)
+      ) (params f);
+      let bb = append_block context "entry" f in
+      position_at_end bb builder;
 
-    try
-      let ret_val = emit_expr True in
-      let _ = build_ret ret_val builder in
-      Llvm_analysis.assert_valid_function f;
-      f
-    with e ->
-      delete_function f;
-      raise e
-    in
+      try
+        let ret_val = emit (get body) in
+        let _ = build_ret ret_val builder in
+        Llvm_analysis.assert_valid_function f;
+        f
+      with e ->
+        delete_function f;
+        raise e) else f
+      in
   let emit_app = function
-    | Sexp [] -> raise (Error "empty function application")
-    | Sexp (Primitive Symbol id :: args) ->
+    | [] -> raise (Error "empty function application")
+    | (Primitive Symbol id :: args) ->
         let f = match lookup_function id the_module with
                                     | Some f -> f
                                     | None -> raise (Error ("unknown function " ^ id)) in
@@ -162,22 +171,20 @@ let rec emit e =
         let got_n = List.length args in
         if expect_n == got_n then () else
           raise (Error ("wrong number of args passed (expected " ^ (string_of_int expect_n) ^ " but got " ^ (string_of_int got_n) ^ ")"));
-        let args = Array.of_list (emit args) in
+        let args = Array.of_list (List.map emit args) in
         build_call f args "calltmp" builder
-    | _ as e -> raise (Error ("cannot apply " ^ (sexp_to_string e)))
+    | _ -> raise (Error "cannot apply function")
         in
-  match e with
-    | [] -> []
-    | h :: t -> (match h with
-      | Primitive p -> emit t @ [emit_expr p]
-      | Declaration {name; ty = FunctionT fp} -> emit t @ [emit_fundef name fp]
-      | Declaration {name; ty = _ as vty} -> defvar name vty; emit t
-      (*| Definition (def, body) -> emit*)
-      | Sexp _ as a -> emit t @ [emit_app a])
+  function
+    | Primitive p -> emit_expr p
+    | Declaration {name; ty = FunctionT fp} -> emit_fundef name fp
+    | Declaration {name; ty = _ as vty} -> defvar name vty; emit_expr Nil
+    | Definition ({name; ty = FunctionT fp}, value) -> emit_fundef ~body:(Some value) name fp
+    | Sexp a -> emit_app a
 
-let t = parse "(def fun : ((thebool bool) (aname string) bool)
-                (fun t \"a\")))" ;;
+let t = parse "(def fun : ((thebool bool) bool)
+                (fun t))" ;;
 List.iter print_endline (List.map sexp_to_string t)
-let c = emit t;;
+let c = List.map emit t;;
 Llvm_analysis.assert_valid_module the_module;
 List.iter dump_value c
