@@ -9,6 +9,7 @@ type ltype =
   | BoolT
   | StringT
   | FunctionT of proto
+  | PairT of ltype * ltype
 and binding = {name : string; ty : ltype}
 and proto = {args : binding list; retty : ltype}
 
@@ -16,6 +17,7 @@ type literal =
   | Number of int
   | Symbol of string
   | String of string
+  | Pair of literal * literal
   | True
   | Nil
 
@@ -52,7 +54,7 @@ let get = function
 (* parsing *)
 
 (*
-ident ::= letter { letter | number }*
+ident ::= {symbol | letter} { symbol | letter | number }*
 string ::= '"' character* '"'
 symbol ::= ident
 number ::= digit+
@@ -61,8 +63,8 @@ sexp ::= '(' definition | atom {sexp | atom}* ')'
 definition ::= 'def' symbol : {symbol | '(' symbol ... ')'}
 *)
 
-let ident = letter >>=
-  (fun f -> many_chars (letter <|> digit) |>>
+let ident = (letter <|> (any_of "+-/*!%$")) >>=
+  (fun f -> many_chars (alphanum) |>>
     fun r -> Char.escaped f ^ r)
 
 let str = char '"' >> many_chars (none_of "\"") << char '"' |>> (fun s -> String s)
@@ -85,10 +87,11 @@ let rec ptype e =
   let parse_proto = (between (char '(') (char ')') (many (not_followed_by ident "" >> parse_binding) >>= fun args -> (ptype |>> fun ret -> {args = args; retty = ret}))) in
   ((parse_proto |>> fun l -> FunctionT l) <|> (ident |>> primtype)) e
 
-let rec type_to_string t = match t with
+let rec type_to_string = function
                     | NumberT -> "number"
                     | BoolT -> "bool"
                     | StringT -> "string"
+                    | PairT(a, b) -> "(" ^ (type_to_string a) ^ " " ^ (type_to_string b) ^")"
                     | FunctionT proto -> "(-> " ^ String.concat " " (List.map (fun b -> "(" ^ b.name ^ " " ^ type_to_string b.ty ^ ")") proto.args) ^ " " ^ (type_to_string proto.retty) ^ ")"
 
 let rec sexp e =
@@ -102,11 +105,12 @@ let rec sexp e =
 let sexp_list = sep_by sexp space
 
 let rec sexp_to_string s =
-  let literal_to_string e = match e with
+  let rec literal_to_string = function
                     | String s -> "\"" ^ s ^ "\""
                     | True -> "t"
                     | Nil -> "nil"
                     | Symbol s -> "'" ^ s
+                    | Pair (a, b) -> "(" ^ (literal_to_string a) ^ " . " ^ (literal_to_string b) ^")"
                     | Number s -> string_of_int s in
   match s with
     | Declaration {name; ty} -> "(" ^ name ^ " : " ^ type_to_string ty ^ ")"
@@ -125,12 +129,24 @@ let context = global_context ()
 let the_module = create_module context "my comp"
 let builder = builder context
 let named_values:(string, (ltype * llvalue)) Hashtbl.t = Hashtbl.create 32
+let carp pp b = build_struct_gep pp 0 "carp" b ;;
+let cdrp pp b = build_struct_gep pp 1 "cdrp" b ;;
 
 let rec lty_to_llvmty = function
   | NumberT -> i32_type context
   | BoolT -> i1_type context
   | StringT -> pointer_type (i8_type context)
+  | PairT (a, b) -> pointer_type (llpair a b)
   | FunctionT l -> function_type (lty_to_llvmty l.retty) (Array.of_list (List.map (fun b -> lty_to_llvmty b.ty) l.args))
+  and llpair a b = (struct_type context [|lty_to_llvmty a; lty_to_llvmty b|])
+
+let prims = Hashtbl.create 32;;
+
+let build_cons car cdr lbl b =
+  let pp = build_alloca (llpair NumberT NumberT) lbl b in
+  let _ = build_store car (carp pp b) b in
+  let _ = build_store cdr (cdrp pp b) b in
+  pp ;;
 
 let rec emit fpm =
   let emit_expr = function
@@ -140,6 +156,7 @@ let rec emit fpm =
     | Symbol v -> (try (match Hashtbl.find named_values v with
                    | (t, v) -> v)
                   with e -> raise (Error ("couldn't find " ^ v)))
+    | Pair (a, b) -> build_alloca (lty_to_llvmty (PairT (NumberT, NumberT))) "pair1" builder
     | String v -> const_stringz context v in
   let defvar name ty = Hashtbl.add named_values name (ty, const_int (lty_to_llvmty NumberT) 0) in
   let emit_fundef ?(body = None) name fp =
@@ -155,7 +172,7 @@ let rec emit fpm =
       position_at_end bb builder;
 
       try
-        let ret_val = emit fpm (get body) in
+        let ret_val = (emit fpm) (get body) in
         let _ = build_ret ret_val builder in
         Llvm_analysis.assert_valid_function f;
         let _ = PassManager.run_function f fpm in
@@ -167,43 +184,55 @@ let rec emit fpm =
   let emit_app = function
     | [] -> raise (Error "empty function application")
     | (Primitive Symbol id :: args) ->
-        let f = match lookup_function id the_module with
-                                    | Some f -> f
-                                    | None -> raise (Error ("unknown function " ^ id)) in
-        let p = params f in
-        let expect_n = Array.length p in
-        let got_n = List.length args in
-        if expect_n == got_n then () else
-          raise (Error ("wrong number of args passed (expected " ^ (string_of_int expect_n) ^ " but got " ^ (string_of_int got_n) ^ ")"));
-        let args = Array.of_list (List.map (emit fpm) args) in
-        build_call f args "calltmp" builder
+        if Hashtbl.mem prims id then
+          ((Hashtbl.find prims id) (List.map (emit fpm) args))
+        else
+          (let f = match lookup_function id the_module with
+                                      | Some f -> f
+                                      | None -> raise (Error ("unknown function " ^ id)) in
+          let p = params f in
+          let expect_n = Array.length p in
+          let got_n = List.length args in
+          if expect_n == got_n then () else
+            raise (Error ("wrong number of args passed (expected " ^ (string_of_int expect_n) ^ " but got " ^ (string_of_int got_n) ^ ")"));
+          let args = Array.of_list (List.map (emit fpm) args) in
+          build_call f args "calltmp" builder)
     | _ -> raise (Error "cannot apply function")
         in
   function
     | Primitive p -> emit_expr p
     | Declaration {name; ty = FunctionT fp} -> emit_fundef name fp
     | Declaration {name; ty = _ as vty} -> defvar name vty; emit_expr Nil
-    | Definition ({name; ty = FunctionT fp}, value) -> emit_fundef ~body:(Some value) name fp
+    | Definition ({name; ty = FunctionT fp}, body) -> emit_fundef ~body:(Some body) name fp
     | Sexp a -> emit_app a
     | _ -> raise (Error "Failed to emit expression") ;;
+
+Hashtbl.add prims "+" (fun args -> build_add (List.nth args 0) (List.nth args 1) "tmpadd" builder);
+Hashtbl.add prims "-" (fun args -> build_sub (List.nth args 0) (List.nth args 1) "tmpsub" builder);
+Hashtbl.add prims "*" (fun args -> build_mul (List.nth args 0) (List.nth args 1) "tmpmul" builder);
+Hashtbl.add prims "/" (fun args -> build_udiv (List.nth args 0) (List.nth args 1) "tmpdiv" builder);
+Hashtbl.add prims "cons" (fun args -> build_cons (List.nth args 0) (List.nth args 1) "tmppair" builder);
+Hashtbl.add prims "car" (fun args -> build_load (carp (List.hd args) builder) "tmpcar" builder);
+Hashtbl.add prims "cdr" (fun args -> build_load (cdrp (List.hd args) builder) "tmpcdr" builder);
+Hashtbl.add prims "begin" (fun args -> last args);
 
 initialize () ;; (* initialize the execution engine *)
 let exec_engine = create the_module ;;
 let fpm = PassManager.create_function the_module ;;
 ignore (PassManager.initialize fpm);;
 
-let s = parse "(def fun : ((thebool bool) bool)
-                nil)" ;;
+let s = parse "(def fun : ((a number) (b number) number)
+                (cdr (cons a b)))" ;;
 let c = List.map (emit fpm) s;;
+
+Llvm_analysis.assert_valid_module the_module;;
+dump_module the_module;;
 
 let _ = PassManager.run_function (List.hd c) fpm ;;
 
 open Ctypes ;;
 open Foreign ;;
 
-let a = get_function_address "fun" (funptr (bool @-> (returning bool))) exec_engine ;;
+let a = get_function_address "fun" (funptr (int @-> int @-> (returning int))) exec_engine ;;
 
-if (a true) then
-  print_endline "SUCCESS"
-else
-  print_endline "FAIL"
+print_int (a 3 5)
