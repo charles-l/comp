@@ -63,8 +63,10 @@ sexp ::= '(' definition | atom {sexp | atom}* ')'
 definition ::= 'def' symbol : {symbol | '(' symbol ... ')'}
 *)
 
-let ident = (letter <|> (any_of "+-/*!%$")) >>=
-  (fun f -> many_chars (alphanum) |>>
+let charsymbols = any_of "+-/*!%$?"
+
+let ident = (letter <|> charsymbols) >>=
+  (fun f -> many_chars (alphanum <|> charsymbols) |>>
     fun r -> Char.escaped f ^ r)
 
 let str = char '"' >> many_chars (none_of "\"") << char '"' |>> (fun s -> String s)
@@ -185,7 +187,7 @@ let rec emit fpm =
     | [] -> raise (Error "empty function application")
     | (Primitive Symbol id :: args) ->
         if Hashtbl.mem prims id then
-          ((Hashtbl.find prims id) (List.map (emit fpm) args))
+          ((Hashtbl.find prims id) args)
         else
           (let f = match lookup_function id the_module with
                                       | Some f -> f
@@ -207,32 +209,61 @@ let rec emit fpm =
     | Sexp a -> emit_app a
     | _ -> raise (Error "Failed to emit expression") ;;
 
-Hashtbl.add prims "+" (fun args -> build_add (List.nth args 0) (List.nth args 1) "tmpadd" builder);
-Hashtbl.add prims "-" (fun args -> build_sub (List.nth args 0) (List.nth args 1) "tmpsub" builder);
-Hashtbl.add prims "*" (fun args -> build_mul (List.nth args 0) (List.nth args 1) "tmpmul" builder);
-Hashtbl.add prims "/" (fun args -> build_udiv (List.nth args 0) (List.nth args 1) "tmpdiv" builder);
-Hashtbl.add prims "cons" (fun args -> build_cons (List.nth args 0) (List.nth args 1) "tmppair" builder);
-Hashtbl.add prims "car" (fun args -> build_load (carp (List.hd args) builder) "tmpcar" builder);
-Hashtbl.add prims "cdr" (fun args -> build_load (cdrp (List.hd args) builder) "tmpcdr" builder);
-Hashtbl.add prims "begin" (fun args -> last args);
+let insert_primitives fpm =
+  let emit = emit fpm in
+  let emit_nth a n = (emit (List.nth a n)) in
+  Hashtbl.add prims "+" (fun args -> build_add (emit_nth args 0) (emit_nth args 1) "tmpadd" builder);
+  Hashtbl.add prims "-" (fun args -> build_sub (emit_nth args 0) (emit_nth args 1) "tmpsub" builder);
+  Hashtbl.add prims "*" (fun args -> build_mul (emit_nth args 0) (emit_nth args 1) "tmpmul" builder);
+  Hashtbl.add prims "/" (fun args -> build_udiv (emit_nth args 0) (emit_nth args 1) "tmpdiv" builder);
+  Hashtbl.add prims "cons" (fun args -> build_cons (emit_nth args 0) (emit_nth args 1) "tmppair" builder);
+  Hashtbl.add prims "car" (fun args -> build_load (carp (emit_nth args 0) builder) "tmpcar" builder);
+  Hashtbl.add prims "cdr" (fun args -> build_load (cdrp (emit_nth args 0) builder) "tmpcdr" builder);
+  Hashtbl.add prims "ieq?" (fun args -> build_icmp Icmp.Eq (emit_nth args 0) (emit_nth args 1) "tmpicmp" builder);
+  Hashtbl.add prims "if" (fun args ->
+                            let startbb = insertion_block builder in
+                            let func = block_parent startbb in
+                            let thenbb = append_block context "then" func in
+                            position_at_end thenbb builder;
+                            let thenval = emit_nth args 1 in
+                            let newthenbb = insertion_block builder in
+                            let elsebb = append_block context "else" func in
+                            position_at_end elsebb builder;
+                            let elseval = emit_nth args 2 in
+                            let newelsebb = insertion_block builder in
+                            let mergebb = append_block context "ifmerg" func in
+                            position_at_end mergebb builder;
+                            let incoming = [(thenval, newthenbb); (elseval, newelsebb)] in
+                            let phi = build_phi incoming "iftmp" builder in
+                            position_at_end startbb builder;
+                            ignore (build_cond_br (emit_nth args 0) thenbb elsebb builder);
+                            position_at_end newthenbb builder; ignore (build_br mergebb builder);
+                            position_at_end newelsebb builder; ignore (build_br mergebb builder);
+                            position_at_end mergebb builder;
+                            phi);
+  Hashtbl.add prims "begin" (fun args -> last (List.map emit args));;
+
 
 initialize () ;; (* initialize the execution engine *)
 let exec_engine = create the_module ;;
 let fpm = PassManager.create_function the_module ;;
+
+insert_primitives fpm;
+
 ignore (PassManager.initialize fpm);;
 
-let s = parse "(def fun : ((a number) (b number) number)
-                (cdr (cons a b)))" ;;
+let s = parse "(def fun : ((n number) number)
+                 (if (ieq? n 2) 1 2))" ;;
 let c = List.map (emit fpm) s;;
 
 Llvm_analysis.assert_valid_module the_module;;
 dump_module the_module;;
 
-let _ = PassManager.run_function (List.hd c) fpm ;;
+ignore (PassManager.run_function (List.hd c) fpm)
 
 open Ctypes ;;
 open Foreign ;;
 
-let a = get_function_address "fun" (funptr (int @-> int @-> (returning int))) exec_engine ;;
+let a = get_function_address "fun" (funptr (int @-> (returning int))) exec_engine ;;
 
-print_int (a 3 5)
+print_int (a 2)
