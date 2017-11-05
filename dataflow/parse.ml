@@ -113,23 +113,37 @@ let parse (s: string) =
     | Failed (msg, e) ->
         failwith msg ;;
 
-let rec ieval = function
-  | Sexp l -> (iapply (ieval (List.hd l)) (List.map ieval (List.tl l)))
+let val_of_symbol = function
+  | Symbol s -> s
+  | _ -> raise (Error "Can't convert to symbol");;
+
+let ntype_to_literal = function
+  | Primitive l -> l
+  | _ -> raise (Error "Can't convert to prim");;
+
+let rec ieval env exp =
+  match exp with
+  | Sexp l -> (iapply (ntype_to_literal (List.hd l)) (List.map (ieval env) (List.tl l)))
+  | Primitive Symbol s -> Hashtbl.find env s
   | Primitive l -> l
   | Definition _ -> Nil
   | Declaration _ -> Nil
 and iapply f args =
   let apply_prim f args =
     match f with
-  | Symbol "fby" ->
-      let upf = (List.nth args 2) in
-      Some {hd = List.hd args;
-      cur = List.hd args;
-      next = fun c -> (iapply upf [c])}
+  | "fby" ->
+      let upf = (List.nth args 1) in
+      Some (Stream {hd = List.hd args;
+        cur = List.hd args;
+        next = fun c -> (iapply upf [c])})
+  | "first" ->
+      (match (List.hd args) with
+      | Stream s -> Some s.hd
+      | _ -> raise (Error "failed"))
   | _ -> None in
-  match apply_prim f args with
+  match apply_prim (val_of_symbol f) args with
   | None -> Nil
-  | Some s -> Stream s;;
+  | Some s -> s;;
 
 
 
@@ -137,4 +151,12 @@ parse "(def x : bool)";;
 parse "(def x ((a : bool) (b : bool)) : number
          (+ 1 a))";;
 
-ieval (List.hd (parse "(fby 1 1)"))
+let literal_to_string = function
+  | Number i -> string_of_int i
+  | Symbol s -> "'" ^ s
+  | String s -> "\"" ^ s ^ "\""
+  | Stream _ -> "<...>"
+  | True -> "t"
+  | Nil -> "nil" ;;
+
+print_endline (literal_to_string (ieval (Hashtbl.create 25) (List.hd (parse "(first (fby 1 2))"))))
