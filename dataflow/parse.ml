@@ -1,5 +1,4 @@
 open MParser
-open Ppx_let
 
 type ltype =
   | NumberT
@@ -9,21 +8,23 @@ type ltype =
 and binding = {name : string; ty : ltype}
 and proto = {args : binding list; retty : ltype}
 
-
 type literal =
   | Number of int
   | Symbol of string
   | String of string
   | Stream of stream
+  | Lambda of lambda
   | True
   | Nil
 and stream = {hd : literal; cur : literal; next : (literal -> literal)}
-
-type ntype =
+and environment = (string, literal) Hashtbl.t
+and lambda = {params : string list; body : ntype list; env : environment}
+and ntype =
   | Declaration of binding
   | Definition of binding * ntype
   | Sexp of ntype list
   | Primitive of literal
+
 
 exception Error of string
 exception No_value
@@ -66,7 +67,8 @@ let rec ptype e =
                   | _ as t -> raise (Error ("unknown type " ^ t)) in
   let parse_binding = ((between_parens
   (ident >>= (fun na -> spaces >> ptype |>> fun ty -> {name=na; ty=ty}))) << spaces) in
-  let parse_proto = (between_parens (many (not_followed_by ident "" >> parse_binding) >>= fun args -> (ptype |>> fun ret -> {args = args; retty = ret}))) in
+  let parse_proto = (between_parens (many (not_followed_by ident "" >> parse_binding) >>=
+    fun args -> (ptype |>> fun ret -> {args = args; retty = ret}))) in
   ((parse_proto |>> fun l -> FunctionT l) <|> (ident |>> primtype)) e
 
 let rec type_to_string = function
@@ -121,9 +123,14 @@ let ntype_to_literal = function
   | Primitive l -> l
   | _ -> raise (Error "Can't convert to prim");;
 
-let rec ieval env exp =
+let rec ieval (env:environment) exp =
   match exp with
-  | Sexp l -> (iapply (ntype_to_literal (List.hd l)) (List.map (ieval env) (List.tl l)))
+  | Sexp l ->
+      (match l with
+      | Primitive Symbol "quote" :: Primitive p :: _ -> p (* TODO: return a stream instead *)
+      | Primitive Symbol "lambda" :: Sexp params :: body ->
+          Lambda {params = (List.map (fun x -> x |> ntype_to_literal |> val_of_symbol) params); body; env}
+      | _ -> (iapply (ntype_to_literal (List.hd l)) (List.map (ieval env) (List.tl l))))
   | Primitive Symbol s -> Hashtbl.find env s
   | Primitive l -> l
   | Definition _ -> Nil
@@ -140,12 +147,14 @@ and iapply f args =
       (match (List.hd args) with
       | Stream s -> Some s.hd
       | _ -> raise (Error "failed"))
+  | "next" ->
+      (match (List.hd args) with
+      | Stream s -> Some (Stream {hd = s.hd; cur = s.next s.cur; next = s.next})
+      | _ -> raise (Error "failed"))
   | _ -> None in
   match apply_prim (val_of_symbol f) args with
   | None -> Nil
   | Some s -> s;;
-
-
 
 parse "(def x : bool)";;
 parse "(def x ((a : bool) (b : bool)) : number
@@ -159,4 +168,5 @@ let literal_to_string = function
   | True -> "t"
   | Nil -> "nil" ;;
 
-print_endline (literal_to_string (ieval (Hashtbl.create 25) (List.hd (parse "(first (fby 1 2))"))))
+print_endline (literal_to_string (ieval (Hashtbl.create 25) (List.hd (parse "(next (fby 1 add))"))))
+(*print_endline (literal_to_string (ieval (Hashtbl.create 25) (List.hd (parse "(quote 2)"))))*)
