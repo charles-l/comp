@@ -17,7 +17,7 @@ type literal =
   | True
   | Nil
 and stream = {hd : literal; cur : literal; next : (literal -> literal)}
-and environment = (string, literal) Hashtbl.t
+and environment = (string, literal) Hashtbl.t list
 and lambda = {params : string list; body : ntype list; env : environment}
 and ntype =
   | Declaration of binding
@@ -94,14 +94,16 @@ let rec sexp e =
 
 let sexp_list = sep_by sexp space
 
+let rec literal_to_string = function
+  | Number i -> string_of_int i
+  | Symbol s -> "'" ^ s
+  | String s -> "\"" ^ s ^ "\""
+  | Stream s -> (literal_to_string s.hd)
+  | True -> "t"
+  | Lambda _ -> "<lambda>"
+  | Nil -> "nil" ;;
+
 let rec sexp_to_string s =
-  let rec literal_to_string = function
-                    | String s -> "\"" ^ s ^ "\""
-                    | True -> "t"
-                    | Nil -> "nil"
-                    | Symbol s -> "'" ^ s
-                    | Stream _ -> "<...>"
-                    | Number s -> string_of_int s in
   match s with
     | Declaration {name; ty} -> "(" ^ name ^ " : " ^ type_to_string ty ^ ")"
     | Definition (def, body) -> let s = sexp_to_string (Declaration def) in
@@ -117,13 +119,13 @@ let parse (s: string) =
 
 let val_of_symbol = function
   | Symbol s -> s
-  | _ -> raise (Error "Can't convert to symbol");;
+  | _ as u -> raise (Error ("Can't convert " ^ literal_to_string u  ^ " to symbol"));;
 
 let ntype_to_literal = function
   | Primitive l -> l
   | _ -> raise (Error "Can't convert to prim");;
 
-let rec ieval (env:environment) exp =
+let rec ieval env exp =
   match exp with
   | Sexp l ->
       (match l with
@@ -131,7 +133,9 @@ let rec ieval (env:environment) exp =
       | Primitive Symbol "lambda" :: Sexp params :: body ->
           Lambda {params = (List.map (fun x -> x |> ntype_to_literal |> val_of_symbol) params); body; env}
       | _ -> (iapply (ntype_to_literal (List.hd l)) (List.map (ieval env) (List.tl l))))
-  | Primitive Symbol s -> Hashtbl.find env s
+  | Primitive Symbol s ->
+      (* lookup primitive here *)
+      Hashtbl.find (List.hd env) s
   | Primitive l -> l
   | Definition _ -> Nil
   | Declaration _ -> Nil
@@ -151,22 +155,26 @@ and iapply f args =
       (match (List.hd args) with
       | Stream s -> Some (Stream {hd = s.hd; cur = s.next s.cur; next = s.next})
       | _ -> raise (Error "failed"))
+  | "add1" ->
+      (match (List.hd args) with
+      | Number n -> Some (Number (n + 1))
+      | _ -> raise (Error "failed"))
   | _ -> None in
-  match apply_prim (val_of_symbol f) args with
-  | None -> Nil
-  | Some s -> s;;
+  match f with
+  | Symbol s ->
+      (match apply_prim s args with
+    | None -> Nil
+    | Some s -> s)
+  | Lambda l ->
+      let fenv = Hashtbl.create 32 in
+      List.iter2 (fun a b -> Hashtbl.add fenv a b) l.params args;
+      List.hd (List.rev (List.map (ieval (fenv :: l.env)) l.body))
+  | _ -> raise (Error "cannot apply function") ;;
+
 
 parse "(def x : bool)";;
 parse "(def x ((a : bool) (b : bool)) : number
          (+ 1 a))";;
 
-let literal_to_string = function
-  | Number i -> string_of_int i
-  | Symbol s -> "'" ^ s
-  | String s -> "\"" ^ s ^ "\""
-  | Stream _ -> "<...>"
-  | True -> "t"
-  | Nil -> "nil" ;;
-
-print_endline (literal_to_string (ieval (Hashtbl.create 25) (List.hd (parse "(next (fby 1 add))"))))
+print_endline (literal_to_string (ieval [Hashtbl.create 25] (List.hd (parse "(next (fby 1 add1))"))))
 (*print_endline (literal_to_string (ieval (Hashtbl.create 25) (List.hd (parse "(quote 2)"))))*)
