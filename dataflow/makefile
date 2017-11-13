@@ -1,4 +1,4 @@
-SOURCES=parse.ml
+SOURCES=parse.ml interp.ml
 PACKAGES=$(shell bash -c 'grep PKG .merlin | sed -s "s/^PKG//" | sed -s "s/ / -package /g"')
 BIN=df
 
