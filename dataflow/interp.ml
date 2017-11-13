@@ -42,9 +42,19 @@ and iapply f args =
 
 let make_default_env =
   let h = Hashtbl.create 32 in
+  let literal_as_number = function
+    | Number n -> n
+    | _ -> raise (Error "cannot add non-number") in
+  let make_arith_op op base = (PLambda (fun args ->
+    (Number (List.fold_left op base
+      (List.map literal_as_number args))))) in
   Hashtbl.add h "add1" (PLambda (fun x -> match x with
                         | [Number n] -> Number (n + 1)
                         | _ -> raise (Error "can't add to non-number")));
+  Hashtbl.add h "+" (make_arith_op (+) 0);
+  Hashtbl.add h "-" (make_arith_op (-) 0);
+  Hashtbl.add h "*" (make_arith_op ( * ) 1);
+  Hashtbl.add h "/" (make_arith_op (/) 1);
   Hashtbl.add h "fby" (PLambda (fun args ->
     let upf = (List.nth args 1) in
     (Stream {hd = List.hd args;
@@ -63,5 +73,5 @@ let make_default_env =
 print_endline (literal_to_string
   (ieval make_default_env
     (List.hd
-      (parse "(next (next (fby 1 add1)))"))))
+      (parse "(next (next (fby 1 (lambda (x) (* x 4)))))"))))
 (*print_endline (literal_to_string (ieval (Hashtbl.create 25) (List.hd (parse "(quote 2)"))))*)
