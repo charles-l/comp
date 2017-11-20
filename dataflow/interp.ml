@@ -2,7 +2,7 @@ open Parse
 
 let rec lookup env n =
   match env with
-  | [] -> raise Not_found
+  | [] -> raise (Error ("Binding not found: " ^ n))
   | h :: t ->
       try
         Hashtbl.find h n
@@ -22,6 +22,18 @@ let rec ieval env exp =
   | Sexp l ->
       (match l with
       | Primitive Symbol "quote" :: Primitive p :: _ -> p (* TODO: return a stream instead *)
+      | Primitive Symbol "let" :: Sexp bindings :: body ->
+          let lenv = Hashtbl.create 8 in
+          List.iter
+            (fun x ->
+              match x with
+                | Sexp s ->
+                    Hashtbl.add lenv
+                      ((List.nth s 0) |> ntype_to_literal |> val_of_symbol)
+                      (ieval env (List.nth s 1))
+                | _ -> raise (Error "expected binding"))
+            bindings;
+          List.hd (List.rev (List.map (ieval (lenv :: env)) body))
       | Primitive Symbol "lambda" :: Sexp params :: body ->
           Lambda {params = (List.map (fun x -> x |> ntype_to_literal |> val_of_symbol) params); body; env}
       | _ -> (iapply (ieval env (List.hd l)) (List.map (ieval env) (List.tl l))))
@@ -51,10 +63,10 @@ let make_default_env =
   Hashtbl.add h "add1" (PLambda (fun x -> match x with
                         | [Number n] -> Number (n + 1)
                         | _ -> raise (Error "can't add to non-number")));
-  Hashtbl.add h "+" (make_arith_op (+) 0);
-  Hashtbl.add h "-" (make_arith_op (-) 0);
+  Hashtbl.add h "+" (make_arith_op ( + ) 0);
+  Hashtbl.add h "-" (make_arith_op ( - ) 0);
   Hashtbl.add h "*" (make_arith_op ( * ) 1);
-  Hashtbl.add h "/" (make_arith_op (/) 1);
+  Hashtbl.add h "/" (make_arith_op ( / ) 1);
   Hashtbl.add h "fby" (PLambda (fun args ->
     let upf = (List.nth args 1) in
     (Stream {hd = List.hd args;
@@ -73,5 +85,4 @@ let make_default_env =
 print_endline (literal_to_string
   (ieval make_default_env
     (List.hd
-      (parse "(next (next (fby 1 (lambda (x) (* x 4)))))"))))
-(*print_endline (literal_to_string (ieval (Hashtbl.create 25) (List.hd (parse "(quote 2)"))))*)
+      (parse "(let ((z 1)) (next (fby z (lambda (x) (* x 4)))))")))) ;;

@@ -78,8 +78,7 @@ let rec type_to_string = function
                     | FunctionT proto -> "(-> " ^ String.concat " " (List.map (fun b -> "(" ^ b.name ^ " " ^ type_to_string b.ty ^ ")") proto.args) ^ " " ^ (type_to_string proto.retty) ^ ")"
 
 let rec sexp e =
-  let fcall = ident >>= fun f ->
-    (spaces >> (sep_by sexp space) |>> fun l -> Sexp ((Primitive (Symbol f)) :: l)) in
+  let slist = (sep_by sexp space) |>> fun s -> Sexp s in
   let name_type_pair = ident >>= fun n -> spaces >> char ':' >> spaces >> ptype |>> fun t -> {name=n; ty=t} in
   let def = string "def" >> spaces >> ident >>= fun n ->
     spaces >> (option (between_parens (sep_by (between_parens name_type_pair) spaces))) >>=
@@ -90,7 +89,7 @@ let rec sexp e =
         | Some v -> FunctionT {args=v; retty=ty} in
         spaces >>? (((*many*) sexp |>> fun body -> (Definition ({name=n; ty}, body))) <|> return (Declaration {name=n; ty}))
   in
-  ((atom |>> fun l -> Primitive l) <|> (between_parens (def <|> fcall))) e
+  ((atom |>> fun l -> Primitive l) <|> (between_parens (def <|> slist))) e
 
 let sexp_list = sep_by sexp space
 
