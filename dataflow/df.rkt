@@ -2,7 +2,7 @@
 (require racket/contract)
 
 (struct func (params body env))
-(struct stream (first current upf))
+(struct stream (first (current #:mutable) upf))
 (struct primfunc (f))
 
 (define/contract (lookup env n)
@@ -64,10 +64,17 @@
              (ieval-list body (cons fr env))))
          (`(lambda ,(list params ...) ,body ...)
            (func params body env))
+         (`(.\ ,body ...)
+           (func '() body env))
          ((list f args ...)
           (iapply (ieval f env) (map ((curryr ieval) env) args)))
          ((? number? string?) expr)
          ((? symbol?) (lookup env expr))))
+
+(define (ensure! msg pred v)
+  (unless (pred v)
+    (error (string-append msg ":") v))
+  v)
 
 (define (make-default-env)
   (list
@@ -80,23 +87,34 @@
              (lambda (init upf)
                (stream init init upf)))
       'force (primfunc
-               (lambda (stream)
-                 (stream-current stream)))
+               (lambda (s)
+                 (ensure! "should be a stream" stream? s)
+                 (stream-current s)))
       'first (primfunc
-               (lambda (stream)
-                 (stream-first stream)))
-      'next (primfunc
-              (lambda (s)
-                (stream
-                  (stream-first s)
-                  (iapply (stream-upf s) '())
-                  (stream-upf s))))
-      '+1 (primfunc
-            (lambda (i)
-              (add1 i)))
+               (lambda (s)
+                 (ensure! "should be a stream" stream? s)
+                 (stream-first s)))
+      'next! (primfunc
+               (lambda (s)
+                 (ensure! "should be a stream" stream? s)
+                 (set-stream-current! s (iapply (stream-upf s) '()))
+                 (stream-current s)))
+      'finite-stream (primfunc
+                       ; this - is just a little horrible.
+                       (lambda args
+                         (ensure! "need at least one element in stream" (compose not zero? length) args)
+                         (stream (car args) (car args)
+                                 (primfunc
+                                   (lambda ()
+                                     (cond
+                                       ((null? (cdr args)) 'nil)
+                                       (else
+                                         (set! args (cdr args))
+                                         (car args))))))))
       )))
 
-(ieval '(letrec ((f (fby 1 (lambda ()
-                             (+ 1 (f))))))
-          ((next f)))
+(ieval '(letrec ((input (finite-stream 3 3 3 3 3))
+                 (sum (fby (first input) (.\ (+ (sum) (next! input)))))
+                 (n (fby 1 (.\ (+ (n) 1)))))
+          (/ (sum) (n)))
        (make-default-env))
