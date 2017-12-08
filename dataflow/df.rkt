@@ -1,7 +1,11 @@
 #lang racket
+;;; notes ;;;
+; lazy evaluation is absolutely necessary
+
 (require racket/contract)
 (require sugar)
 (require graph)
+(require (only-in srfi/1 find))
 
 (define (prompt-for-value name)
   (string-append "Enter value for " (symbol->string name) ": ")
@@ -23,18 +27,17 @@
   (match expr
     (`(define ,var ,expr)
       (add-vertex! *graph* var)
-      ;TODO: node-f-set!
       (add-directed-edge! *graph* (compile-expr expr) var)
+      (node-f-set! var identity)
       var)
     (`(fby ,f ,u)
       (let* ((first (compile-expr f))
              (upf (compile-expr u))
-             ; FIXME: this is wrong
              (cur first)
              (fby-node
                (add-uniq-vertex-with-f! 'fby
                                         ; FIXME: this is wrong too
-                                        (lambda ()
+                                        (lambda (cmd)
                                           (set! cur (compile-expr upf))
                                           ))))
         (add-directed-edge! *graph* first fby-node)
@@ -60,6 +63,15 @@
              expr)))
     (else (error "Unknown expression"))))
 
+(define (parents g v)
+  (cond
+    ((filter (λ (e) (eq? (cadr e) v)) (get-edges g)) => (curry map car))
+    (else '())))
+
+(define (evaluate g v)
+  (let ((args (map (curry evaluate g) (parents g v))))
+    (apply (node-f v) args)))
+
 (define *internal-funcs*
   (hash
     '+ +
@@ -69,8 +81,11 @@
 
 ;(compile-expr '(+ (- 1 2) 3))
 ;(compile-expr '(define total (fby 0 (+ total x))))
-(compile-expr '(define n (fby 3 (+ n 2))))
-(compile-expr '(define prime (fby 2 (whenever n (isprime n)))))
+(compile-expr '(define a 1))
+
+
+(evaluate *graph* 'a)
+
 (let* ((graphviz-str (graphviz *graph*))
        (escaped-graphviz (string-replace graphviz-str "\"" "\\\""))
        (cmd (string-append "printf \"" escaped-graphviz "\" | dot -Tpng | feh -")))
