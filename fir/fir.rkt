@@ -3,7 +3,7 @@
 (require sugar)
 
 (define +word-size+ 4)
-(define *regs* '(eax esp))
+(define *regs* '(eax esp ebx edx))
 
 (define (reg? r) (memq r *regs*))
 (define env? (hash/c symbol? integer?))
@@ -49,17 +49,30 @@
   (string-append (number->string (- (* +word-size+ (cdr o)))) "(" (reg->string (car o)) ")"))
 
 ; TODO: write macro to generate this
-(define instructions (hash
-                       'movl (match-lambda*
-                               (`(,(or (? literal? a) (? reg? a) (? offset? a)) ,(or (? reg? b) (? offset? b)))
-                                 (list "movl" a b)))
-                       'addl (match-lambda*
-                               (`(,(or (? literal? a) (? reg? a) (? offset? a)) ,(or (? reg? b)))
-                                 (list "addl" a b)))
-                       ))
+(define *instructions* (hash
+                         'movl (match-lambda*
+                                 (`(,(or (? literal? a) (? reg? a) (? offset? a)) ,(or (? reg? b) (? offset? b)))
+                                   (list "movl" a b)))
+                         'addl (match-lambda*
+                                 (`(,(or (? literal? a) (? reg? a) (? offset? a)) ,(or (? reg? b)))
+                                   (list "addl" a b)))
+                         'subl (match-lambda*
+                                 (`(,(or (? literal? a) (? reg? a) (? offset? a)) ,(or (? reg? b)))
+                                   (list "subl" a b)))
+                         'imul (match-lambda*
+                                 (`(,(or (? literal? a) (? reg? a) (? offset? a)) ,(or (? reg? b)))
+                                   (list "imul" a b)))
+                         'idiv (match-lambda* ; needs divisor in %edx:%eax
+                                 (`(,(or (? literal? a) (? reg? a) (? offset? a)))
+                                   (list "idiv" a)))
+                         ))
+
+(define *binops* #hash((+ . addl)
+                       (- . subl)
+                       (* . imul)))
 
 (define (inst v . args)
-  (apply (hash-ref instructions v) args))
+  (apply (hash-ref *instructions* v) args))
 
 ; move a variable or literal into %eax
 (define (mov-imm-to-eax i env)
@@ -70,6 +83,14 @@
 (define (compile expr env)
   (match expr
     ((? immediate? i) (list (mov-imm-to-eax i env)))
+    (`(,(? (curry hash-has-key? *binops*) o) ,(? immediate? a) ,(? immediate? b))
+      (list (mov-imm-to-eax a env)
+            (inst (hash-ref *binops* o) b 'eax)))
+    (`(/ ,(? immediate? a) ,(? immediate? b))
+      (list (mov-imm-to-eax a env)
+            (inst 'movl b 'ebx)
+            (inst 'movl 0 'edx)
+            (inst 'idiv 'ebx)))
     (`(if ,(? immediate? cond) ,then-expr ,else-expr)
       (let ((else-label (gensym 'else))
             (end-label (gensym 'end)))
@@ -118,4 +139,4 @@
   (map print-asm code)
   (displayln "ret"))
 
-(wrap (compile '(let f 1 (let g 2 (let i 3 g))) #hash()))
+(wrap (compile '(let f 1 (let g (+ f 2) (/ g 3))) #hash()))
