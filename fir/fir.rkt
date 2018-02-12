@@ -1,9 +1,20 @@
 #lang racket
 
+; ideas
+; * dynamic tag generation (most used types get tags, others do memory lookups)
+
 (require sugar)
 
 (define +word-size+ 4)
 (define *regs* '(eax esp ebx edx))
+(define *binops* #hash((+ . addl)
+                       (- . subl)
+                       (* . imul)))
+
+(define *tags* #hash((int . 0)
+                     (bool . 1)))
+
+(define do-tag? (make-parameter #t))
 
 (define (reg? r) (memq r *regs*))
 (define env? (hash/c symbol? integer?))
@@ -11,7 +22,7 @@
 (define (offset? p)
   (and (pair? p) (reg? (car p)) (integer? (cdr p))))
 
-(define (immediate? x) (or (literal? x) (symbol? x)))
+(define (immediate? x) (or (literal? x) (symbol? x) (boolean? x)))
 
 (provide
   (contract-out
@@ -23,7 +34,7 @@
     (env-size (-> env? integer?))
     (env-add (-> env? symbol? (values env? integer?)))
     (env-lookup (-> env? symbol? integer?))
-    (mov-imm-to-eax (-> immediate? env? list?))))
+    (compile-imm (-> immediate? env? list?))))
 
 (define (label s)
   (list (string-append (->string s) ":")))
@@ -67,27 +78,32 @@
                                    (list "idiv" a)))
                          ))
 
-(define *binops* #hash((+ . addl)
-                       (- . subl)
-                       (* . imul)))
-
 (define (inst v . args)
   (apply (hash-ref *instructions* v) args))
 
-; move a variable or literal into %eax
-(define (mov-imm-to-eax i env)
+(define (with-tag t val)
+  (bitwise-and (arithmetic-shift val 1)
+               (hash-ref *tags* t)))
+
+(define (maybe-tag t val)
+  (if (do-tag?)
+      (with-tag t val)
+      val))
+
+(define (compile-imm i env)
   (match i
-    ((? symbol? s) (inst 'movl (cons 'esp (env-lookup env s)) 'eax))
-    ((? literal? d) (inst 'movl d 'eax))))
+    ((? symbol? s) (cons 'esp (env-lookup env s)) 'eax)
+    ((? literal? d) (maybe-tag 'int d))
+    ((? boolean? b) (maybe-tag 'bool (if b 1 0)))))
 
 (define (compile expr env)
   (match expr
-    ((? immediate? i) (list (mov-imm-to-eax i env)))
+    ((? immediate? i) (list (inst 'movl (compile-imm i env) 'eax)))
     (`(,(? (curry hash-has-key? *binops*) o) ,(? immediate? a) ,(? immediate? b))
-      (list (mov-imm-to-eax a env)
+      (list (inst 'movl (compile-imm a env) 'eax)
             (inst (hash-ref *binops* o) b 'eax)))
     (`(/ ,(? immediate? a) ,(? immediate? b))
-      (list (mov-imm-to-eax a env)
+      (list (inst 'movl (compile-imm a env) 'eax)
             (inst 'movl b 'ebx)
             (inst 'movl 0 'edx)
             (inst 'idiv 'ebx)))
@@ -95,7 +111,7 @@
       (let ((else-label (gensym 'else))
             (end-label (gensym 'end)))
         (append
-          (mov-imm-to-eax cond env)
+          (list (inst 'movl (compile-imm cond env) 'eax))
           '(("cmp" "$0" "%eax"))
           `(("jz" ,else-label))
           (compile then-expr env)
