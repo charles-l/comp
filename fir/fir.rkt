@@ -1,7 +1,25 @@
 #lang racket
 
-; ideas
-; * dynamic tag generation (most used types get tags, others do memory lookups)
+; LINKS
+; * http://web.cs.ucla.edu/~palsberg/tba/
+; * http://www.ccs.neu.edu/home/shivers/papers/diss.pdf
+; * http://www.ccs.neu.edu/home/shivers/papers/trec.pdf
+; * http://www.ccs.neu.edu/home/shivers/citations.html
+; * https://www.cs.purdue.edu/homes/suresh/590s-Fall2002/papers/Orbit.pdf
+; * http://web.cs.ucla.edu/~palsberg/tba/papers/dimock-muller-turbak-wells-icfp97.pdf
+;
+; TODO
+; * deforestation
+; * inlining
+; * partial evaluation
+; * common subexpression
+; * loop invarient detection
+; * range analysis
+; * redundent assignment
+; * dead code elimination
+; * constant propagation
+; * code hoisting
+; * loop unrolling
 
 (require sugar)
 
@@ -14,7 +32,7 @@
 (define *tags* #hash((int . 0)
                      (bool . 1)))
 
-(define do-tag? (make-parameter #t))
+(define *functions* '())
 
 (define (reg? r) (memq r *regs*))
 (define env? (hash/c symbol? integer?))
@@ -62,7 +80,7 @@
 ; TODO: write macro to generate this
 (define *instructions* (hash
                          'movl (match-lambda*
-                                 (`(,(or (? literal? a) (? reg? a) (? offset? a)) ,(or (? reg? b) (? offset? b)))
+                                 (`(,(or (? literal? a) (? reg? a) (? offset? a) (? string? a)) ,(or (? reg? b) (? offset? b)))
                                    (list "movl" a b)))
                          'addl (match-lambda*
                                  (`(,(or (? literal? a) (? reg? a) (? offset? a)) ,(or (? reg? b)))
@@ -76,25 +94,29 @@
                          'idiv (match-lambda* ; needs divisor in %edx:%eax
                                  (`(,(or (? literal? a) (? reg? a) (? offset? a)))
                                    (list "idiv" a)))
-                         ))
+                         'call (match-lambda*
+                                 (`(,s)
+                                   (list "call" s)))))
 
 (define (inst v . args)
   (apply (hash-ref *instructions* v) args))
 
 (define (with-tag t val)
-  (bitwise-and (arithmetic-shift val 1)
+  (bitwise-ior (arithmetic-shift val 1)
                (hash-ref *tags* t)))
 
-(define (maybe-tag t val)
-  (if (do-tag?)
-      (with-tag t val)
-      val))
-
-(define (compile-imm i env)
+(define (compile-imm i env #:boxed (do-box? #f))
+  (define (maybe-tag t v)
+    (if do-box?
+        (with-tag t v)
+        v))
   (match i
     ((? symbol? s) (cons 'esp (env-lookup env s)) 'eax)
     ((? literal? d) (maybe-tag 'int d))
-    ((? boolean? b) (maybe-tag 'bool (if b 1 0)))))
+    ((? boolean? b) (maybe-tag 'bool (if b (arithmetic-shift 1 31) 0)))))
+
+(define (new-lambda-name)
+  (gensym 'lambda))
 
 (define (compile expr env)
   (match expr
@@ -124,7 +146,16 @@
         (append
           (compile val env)
           (list (inst 'movl 'eax `(esp . ,slot)))
-          (compile body new-env))))))
+          (compile body new-env))))
+    (`(λ ,args ,body)
+      (let ((l-name (new-lambda-name)))
+       (compile-function! l-name body)
+       (list (inst 'movl (~a "$" l-name)'eax))))
+    (`(,f ,args ...)
+      ; TODO compile and push
+      (append (compile f env)
+              (list (inst 'call "*%eax"))
+              ))))
 
 
 (define (asmthing->string x)
@@ -134,6 +165,7 @@
         ((string? x) x)
         (else
           (error "can't convert to string:" x))))
+
 
 (define (print-asm instruction)
   (let ((instruction* (map asmthing->string instruction)))
@@ -146,13 +178,19 @@
            (else
              (car instruction*))))))
 
-(define (wrap code)
-  (displayln ".text")
-  (displayln ".global fir_entry")
-  (displayln ".type fir_entry @function")
-  (displayln ".align 8")
-  (displayln "fir_entry:")
-  (map print-asm code)
-  (displayln "ret"))
+(define (compile-function! name code) ; TODO include env
+  (set! *functions* (cons (cons name (compile code #hash())) *functions*)))
 
-(wrap (compile '(let f 1 (let g (+ f 2) (/ g 3))) #hash()))
+(define (emit-functions)
+  (for ((f *functions*))
+    (match-let (((cons name code) f))
+      (displayln (~a ".global " name))
+      (displayln (~a ".type " name " @function"))
+      (displayln ".align 8")
+      (displayln (~a name ":"))
+      (map print-asm code)
+      (displayln "ret"))))
+
+(compile-function! "fir_entry" '(let f (λ (a) 2) (let g (f) (+ g 3))))
+
+(emit-functions)
