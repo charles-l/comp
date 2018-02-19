@@ -24,7 +24,7 @@
 (require sugar)
 
 (define +word-size+ 4)
-(define *regs* '(eax esp ebx edx))
+(define *regs* '(eax esp ebx edx ebp))
 (define *binops* #hash((+ . addl)
                        (- . subl)
                        (* . imul)))
@@ -50,7 +50,7 @@
     (literal->string (-> literal? string?))
     (offset->string (-> offset? string?))
     (env-size (-> env? integer?))
-    (env-add (-> env? symbol? (values env? integer?)))
+    (env-bind-local (-> env? symbol? (values env? integer?)))
     (env-lookup (-> env? symbol? integer?))
     (compile-imm (-> immediate? env? list?))))
 
@@ -58,14 +58,19 @@
   (list (string-append (->string s) ":")))
 
 (define (env-size h)
-  (length (hash->list h)))
+  (count (compose negative? cdr cdr) (hash->list h)))
 
-(define (env-add env name)
-  (let ((l (add1 (env-size env))))
+(define (env-bind-local env name)
+  (let ((l (cons 'ebp (- (* +word-size+ (add1 (env-size env)))))))
    (values (hash-set env name l) l)))
 
 (define (env-lookup env name)
   (hash-ref env name))
+
+(define (env-bind-args env args)
+  (for/hash ((a args)
+             (i (in-naturals 2)))
+    (values a (cons 'ebp (* +word-size+ i)))))
 
 (define (reg->string r)
   (string-append "%" (symbol->string r)))
@@ -96,7 +101,11 @@
                                    (list "idiv" a)))
                          'call (match-lambda*
                                  (`(,s)
-                                   (list "call" s)))))
+                                   (list "call" s)))
+                         'push (match-lambda*
+                                 (`(,s)
+                                   (list "push" s)))
+                         ))
 
 (define (inst v . args)
   (apply (hash-ref *instructions* v) args))
@@ -111,7 +120,7 @@
         (with-tag t v)
         v))
   (match i
-    ((? symbol? s) (cons 'esp (env-lookup env s)) 'eax)
+    ((? symbol? s) (env-lookup env s))
     ((? literal? d) (maybe-tag 'int d))
     ((? boolean? b) (maybe-tag 'bool (if b (arithmetic-shift 1 31) 0)))))
 
@@ -142,21 +151,28 @@
           (compile else-expr env)
           `(,(label end-label)))))
     (`(let ,name ,val ,body)
-      (let-values (((new-env slot) (env-add env name)))
+      (let-values (((new-env slot) (env-bind-local env name)))
         (append
           (compile val env)
-          (list (inst 'movl 'eax `(esp . ,slot)))
+          (list (inst 'movl 'eax slot))
           (compile body new-env))))
     (`(λ ,args ,body)
       (let ((l-name (new-lambda-name)))
-       (compile-function! l-name body)
-       (list (inst 'movl (~a "$" l-name)'eax))))
+       (compile-function! l-name body (env-bind-args env args))
+       (list (inst 'movl (~a "$" l-name) 'eax))))
     (`(,f ,args ...)
-      ; TODO compile and push
       (append (compile f env)
-              (list (inst 'call "*%eax"))
+              ; TODO push each arg
+              (append
+                (list
+                  (inst 'push 'ebp)
+                  (inst 'movl 'esp 'ebp))
+                (map (curry inst 'push)
+                     (map compile-imm args))
+                (list (inst 'call "*%eax")
+                      (inst 'movl 'ebp 'esp)
+                      (inst 'popl 'ebp)))
               ))))
-
 
 (define (asmthing->string x)
   (cond ((reg? x) (reg->string x))
@@ -178,8 +194,8 @@
            (else
              (car instruction*))))))
 
-(define (compile-function! name code) ; TODO include env
-  (set! *functions* (cons (cons name (compile code #hash())) *functions*)))
+(define (compile-function! name code env)
+  (set! *functions* (cons (cons name (compile code env)) *functions*)))
 
 (define (emit-functions)
   (for ((f *functions*))
@@ -191,6 +207,6 @@
       (map print-asm code)
       (displayln "ret"))))
 
-(compile-function! "fir_entry" '(let f (λ (a) 2) (let g (f) (+ g 3))))
+(compile-function! "fir_entry" '(let f (λ (a) (+ a 2)) (let g (f 1) (+ g 3))) #hash())
 
 (emit-functions)
