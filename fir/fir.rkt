@@ -79,8 +79,7 @@
   (string-append "$" (number->string l)))
 
 (define (offset->string o)
-  ; TODO: move this implicit word-size stuff up one level
-  (string-append (number->string (- (* +word-size+ (cdr o)))) "(" (reg->string (car o)) ")"))
+  (string-append (number->string (cdr o)) "(" (reg->string (car o)) ")"))
 
 ; TODO: write macro to generate this
 (define *instructions* (hash
@@ -102,9 +101,12 @@
                          'call (match-lambda*
                                  (`(,s)
                                    (list "call" s)))
-                         'push (match-lambda*
+                         'pushl (match-lambda*
                                  (`(,s)
-                                   (list "push" s)))
+                                   (list "pushl" s)))
+                         'popl (match-lambda*
+                                 (`(,s)
+                                   (list "popl" s)))
                          ))
 
 (define (inst v . args)
@@ -158,17 +160,17 @@
           (compile body new-env))))
     (`(λ ,args ,body)
       (let ((l-name (new-lambda-name)))
-       (compile-function! l-name body (env-bind-args env args))
+       (compile-function! l-name body (env-bind-args #hash() args))
        (list (inst 'movl (~a "$" l-name) 'eax))))
     (`(,f ,args ...)
       (append (compile f env)
               ; TODO push each arg
               (append
                 (list
-                  (inst 'push 'ebp)
+                  (inst 'pushl 'ebp)
                   (inst 'movl 'esp 'ebp))
-                (map (curry inst 'push)
-                     (map compile-imm args))
+                (map (curry inst 'pushl)
+                     (map (curryr compile-imm env) args))
                 (list (inst 'call "*%eax")
                       (inst 'movl 'ebp 'esp)
                       (inst 'popl 'ebp)))
@@ -207,6 +209,7 @@
       (map print-asm code)
       (displayln "ret"))))
 
-(compile-function! "fir_entry" '(let f (λ (a) (+ a 2)) (let g (f 1) (+ g 3))) #hash())
+(compile-function! "fir_entry" '(let f (λ (a) (+ a 2)) (let g
+                                                            (f 8) (+ g 3))) #hash())
 
 (emit-functions)
