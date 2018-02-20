@@ -164,16 +164,10 @@
        (list (inst 'movl (~a "$" l-name) 'eax))))
     (`(,f ,args ...)
       (append (compile f env)
-              ; TODO push each arg
               (append
-                (list
-                  (inst 'pushl 'ebp)
-                  (inst 'movl 'esp 'ebp))
                 (map (curry inst 'pushl)
                      (map (curryr compile-imm env) args))
-                (list (inst 'call "*%eax")
-                      (inst 'movl 'ebp 'esp)
-                      (inst 'popl 'ebp)))
+                (list (inst 'call "*%eax")))
               ))))
 
 (define (asmthing->string x)
@@ -206,10 +200,15 @@
       (displayln (~a ".type " name " @function"))
       (displayln ".align 8")
       (displayln (~a name ":"))
+      (displayln "pushl %ebp")
+      (displayln "movl %esp, %ebp")
       (map print-asm code)
+      (displayln "movl %ebp, %esp")
+      (displayln "popl %ebp")
       (displayln "ret"))))
 
-(compile-function! "fir_entry" '(let f (λ (a) (+ a 2)) (let g
-                                                            (f 8) (+ g 3))) #hash())
+(compile-function! "fir_entry" '(let f (λ (a)
+                                          (+ a 2))
+                                  (f 15)) #hash())
 
 (emit-functions)
