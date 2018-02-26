@@ -162,6 +162,7 @@
     ((? literal? d) (maybe-tag 'int d))
     ((? boolean? b) (maybe-tag 'bool (if b (arithmetic-shift 1 31) 0)))))
 
+; TODO write match macro that ensures we check every expression in the grammar
 (define (compile expr env)
   (define (expect-type! expected val)
     (match val
@@ -177,6 +178,7 @@
   (match expr
     ((? immediate? i)
      (list (inst 'movl (compile-imm i env) 'eax)))
+    ;TODO combine binops with functions as primfuncs
     (`(,(? (curry hash-has-key? *binops*) o) ,(? immediate? a) ,(? immediate? b))
       (expect-type! 'int a)
       (expect-type! 'int b)
@@ -209,6 +211,7 @@
           (list (inst 'movl 'eax slot))
           (compile body new-env))))
     (`(λ ,args ,body)
+      ; TODO combine with let and name functions their var names
       ; TODO check types of function
       (let ((l-name (gensym 'lambda)))
        (compile-function! l-name body (env-bind-args env args))
@@ -230,7 +233,6 @@
         (else
           (error "can't convert to string:" x))))
 
-
 (define (print-asm instruction)
   (let ((instruction* (map asmthing->string instruction)))
    (displayln
@@ -242,7 +244,11 @@
            (else
              (car instruction*))))))
 
+
+(struct function (name code args))
+
 (define (compile-function! name code env)
+  (println (end-expressions code))
   (set! *functions* (cons (cons name (compile code env)) *functions*)))
 
 (define (emit-functions)
