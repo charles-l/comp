@@ -62,18 +62,30 @@
 (define (env-frame-size h)
   (count (compose negative? cdr cdr) (hash->list h)))
 
-(define (env-bind-local env name (type #f))
-  (let ((slot (add1 (env-frame-size (car env)))))
+; TODO rename these to something saner
+(define (name:type-type n)
+  (let ((l (string-split (symbol->string n) ":")))
+   (if (= 1 (length l))
+       'any
+       (string->symbol (cadr l)))))
+(define (name:type-name n)
+  (string->symbol (car (string-split (symbol->string n) ":"))))
+
+(define (env-bind-local env name:type)
+  (let ((slot (add1 (env-frame-size (car env))))
+        (name (name:type-name name:type))
+        )
    (values
      (cons (hash-set (car env) name
-                     (cons (binding name (if type type 'any)) slot))
+                     (cons (binding name
+                                    (name:type-type name:type)) slot))
            (cdr env))
      (cons 0 slot))))
 
 (define (env-lookup env name)
   (let l ((e env) (i 0))
    (if (null? e)
-       (error "no such binding" name)
+       (error "no such binding:" name)
        (let ((v (hash-ref (car e) name #f)))
         (if v
             (cons i v)
@@ -86,11 +98,11 @@
 (define (env-lookup-type env name)
   (binding-type (car (cdr (env-lookup env name)))))
 
-(define (env-bind-args env args (type #f))
+(define (env-bind-args env args)
   (cons
     #hash()
     (cons (for/hash ((a args) (i (in-naturals 2)))
-            (values a (cons (binding a (if type type 'any)) i)))
+            (values (name:type-name a) (cons (binding (name:type-name a) (name:type-type a)) i)))
           env)))
 
 (define (reg->string r)
@@ -176,15 +188,15 @@
           `(,(label else-label))
           (compile else-expr env)
           `(,(label end-label)))))
-    (`(let ,name ,val ,body)
-      (let-values (((new-env slot) (env-bind-local env name)))
+    (`(let ,name:type ,val ,body)
+      (let-values (((new-env slot) (env-bind-local env name:type)))
         (append
           (compile val env)
           (list (inst 'movl 'eax slot))
           (compile body new-env))))
     (`(λ ,args ,body)
       (let ((l-name (new-lambda-name)))
-       (compile-function! l-name body (env-bind-args #hash() args))
+       (compile-function! l-name body (env-bind-args env args))
        (list (inst 'movl (~a "$" l-name) 'eax))))
     (`(,f ,args ...)
       (append (compile f env)
@@ -230,5 +242,5 @@
       (displayln "popl %ebp")
       (displayln "ret"))))
 
-(compile-function! "fir_entry" '(let f (λ (a) (+ a 2)) (let g (f 1) (+ g 3))) (list #hash()))
+(compile-function! "fir_entry" '(let f (λ (a:int) (+ a 2)) (let g:int (f 1) (+ g 3))) (list #hash()))
 (emit-functions)
