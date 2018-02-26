@@ -188,7 +188,6 @@
        (list (inst 'movl (~a "$" l-name) 'eax))))
     (`(,f ,args ...)
       (append (compile f env)
-              ; TODO push each arg
               (append
                 (map (curry inst 'pushl)
                      (map (curryr compile-imm env) (reverse args)))
@@ -231,8 +230,5 @@
       (displayln "popl %ebp")
       (displayln "ret"))))
 
-(compile-function! "fir_entry" '(let f (λ (a b) (- a b))
-                                 (f 2 1)) (list #hash()))
-#;(compile-function! "fir_entry" '(let f (λ (a) (+ a 2)) (let g (f 1) (+ g 3))) (list #hash()))
-
+(compile-function! "fir_entry" '(let f (λ (a) (+ a 2)) (let g (f 1) (+ g 3))) (list #hash()))
 (emit-functions)
