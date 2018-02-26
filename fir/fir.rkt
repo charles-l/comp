@@ -32,13 +32,15 @@
 (define *tags* #hash((int . 0)
                      (bool . 1)))
 
+(struct binding (name type))
+
 (define *functions* '())
 
 (define (reg? r) (memq r *regs*))
-(define env? (hash/c symbol? integer?))
+(define env? (listof (hash/c symbol? (cons/c binding? integer?))))
 (define (literal? l) (integer? l))
 (define (offset? p)
-  (and (pair? p) (reg? (car p)) (integer? (cdr p))))
+  (and (pair? p) (integer? (car p)) (integer? (cdr p))))
 
 (define (immediate? x) (or (literal? x) (symbol? x) (boolean? x)))
 
@@ -49,28 +51,47 @@
     (reg->string (-> reg? string?))
     (literal->string (-> literal? string?))
     (offset->string (-> offset? string?))
-    (env-size (-> env? integer?))
+    (env-frame-size (-> env? integer?))
     (env-bind-local (-> env? symbol? (values env? integer?)))
-    (env-lookup (-> env? symbol? integer?))
+    (env-lookup (-> env? symbol? (cons/c integer? (cons/c binding? integer?))))
     (compile-imm (-> immediate? env? list?))))
 
 (define (label s)
   (list (string-append (->string s) ":")))
 
-(define (env-size h)
+(define (env-frame-size h)
   (count (compose negative? cdr cdr) (hash->list h)))
 
-(define (env-bind-local env name)
-  (let ((l (cons 'ebp (- (* +word-size+ (add1 (env-size env)))))))
-   (values (hash-set env name l) l)))
+(define (env-bind-local env name (type #f))
+  (let ((slot (add1 (env-frame-size (car env)))))
+   (values
+     (cons (hash-set (car env) name
+                     (cons (binding name (if type type 'any)) slot))
+           (cdr env))
+     (cons 0 slot))))
 
 (define (env-lookup env name)
-  (hash-ref env name))
+  (let l ((e env) (i 0))
+   (if (null? e)
+       (error "no such binding" name)
+       (let ((v (hash-ref (car e) name #f)))
+        (if v
+            (cons i v)
+            (l (cdr e) (add1 i)))))))
 
-(define (env-bind-args env args)
-  (for/hash ((a args)
-             (i (in-naturals 2)))
-    (values a (cons 'ebp (* +word-size+ i)))))
+(define (env-lookup-slot env name)
+  (let ((b (env-lookup env name)))
+   (cons (car b) (cdr (cdr b)))))
+
+(define (env-lookup-type env name)
+  (binding-type (car (cdr (env-lookup env name)))))
+
+(define (env-bind-args env args (type #f))
+  (cons
+    #hash()
+    (cons (for/hash ((a args) (i (in-naturals 2)))
+            (values a (cons (binding a (if type type 'any)) i)))
+          env)))
 
 (define (reg->string r)
   (string-append "%" (symbol->string r)))
@@ -79,7 +100,11 @@
   (string-append "$" (number->string l)))
 
 (define (offset->string o)
-  (string-append (number->string (cdr o)) "(" (reg->string (car o)) ")"))
+  (cond ((zero? (car o)) ; in current frame
+         (string-append (number->string (- (* +word-size+ (cdr o)))) "(%ebp)"))
+        ((eq? (car o) 1) ; argument
+         (string-append (number->string (* +word-size+ (cdr o))) "(%ebp)"))
+        (else (error "unhandled offset" o))))
 
 ; TODO: write macro to generate this
 (define *instructions* (hash
@@ -102,12 +127,11 @@
                                  (`(,s)
                                    (list "call" s)))
                          'pushl (match-lambda*
-                                 (`(,s)
-                                   (list "pushl" s)))
+                                  (`(,s)
+                                    (list "pushl" s)))
                          'popl (match-lambda*
                                  (`(,s)
-                                   (list "popl" s)))
-                         ))
+                                   (list "popl" s)))))
 
 (define (inst v . args)
   (apply (hash-ref *instructions* v) args))
@@ -122,7 +146,7 @@
         (with-tag t v)
         v))
   (match i
-    ((? symbol? s) (env-lookup env s))
+    ((? symbol? s) (env-lookup-slot env s))
     ((? literal? d) (maybe-tag 'int d))
     ((? boolean? b) (maybe-tag 'bool (if b (arithmetic-shift 1 31) 0)))))
 
@@ -134,7 +158,7 @@
     ((? immediate? i) (list (inst 'movl (compile-imm i env) 'eax)))
     (`(,(? (curry hash-has-key? *binops*) o) ,(? immediate? a) ,(? immediate? b))
       (list (inst 'movl (compile-imm a env) 'eax)
-            (inst (hash-ref *binops* o) b 'eax)))
+            (inst (hash-ref *binops* o) (compile-imm b env) 'eax)))
     (`(/ ,(? immediate? a) ,(? immediate? b))
       (list (inst 'movl (compile-imm a env) 'eax)
             (inst 'movl b 'ebx)
@@ -166,15 +190,9 @@
       (append (compile f env)
               ; TODO push each arg
               (append
-                (list
-                  (inst 'pushl 'ebp)
-                  (inst 'movl 'esp 'ebp))
                 (map (curry inst 'pushl)
-                     (map (curryr compile-imm env) args))
-                (list (inst 'call "*%eax")
-                      (inst 'movl 'ebp 'esp)
-                      (inst 'popl 'ebp)))
-              ))))
+                     (map (curryr compile-imm env) (reverse args)))
+                (list (inst 'call "*%eax")))))))
 
 (define (asmthing->string x)
   (cond ((reg? x) (reg->string x))
@@ -206,10 +224,15 @@
       (displayln (~a ".type " name " @function"))
       (displayln ".align 8")
       (displayln (~a name ":"))
+      (displayln "pushl %ebp")
+      (displayln "movl %esp, %ebp")
       (map print-asm code)
+      (displayln "movl %ebp, %esp")
+      (displayln "popl %ebp")
       (displayln "ret"))))
 
-(compile-function! "fir_entry" '(let f (λ (a) (+ a 2)) (let g
-                                                            (f 8) (+ g 3))) #hash())
+(compile-function! "fir_entry" '(let f (λ (a b) (- a b))
+                                 (f 2 1)) (list #hash()))
+#;(compile-function! "fir_entry" '(let f (λ (a) (+ a 2)) (let g (f 1) (+ g 3))) (list #hash()))
 
 (emit-functions)
