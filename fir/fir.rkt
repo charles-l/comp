@@ -162,21 +162,35 @@
     ((? literal? d) (maybe-tag 'int d))
     ((? boolean? b) (maybe-tag 'bool (if b (arithmetic-shift 1 31) 0)))))
 
-(define (new-lambda-name)
-  (gensym 'lambda))
-
 (define (compile expr env)
+  (define (expect-type! expected val)
+    (match val
+      ((? symbol?)
+       (define valt (env-lookup-type env val))
+       (unless (eq? valt expected)
+         (error "expected variable" val "to be type" expected "but was" valt)))
+      ((? literal?)
+       (unless (eq? expected 'int) (error "unexpected literal" val)))
+      ((? boolean?)
+       (unless (eq? expected 'bool) (error "unexpected boolean" val)))))
+
   (match expr
-    ((? immediate? i) (list (inst 'movl (compile-imm i env) 'eax)))
+    ((? immediate? i)
+     (list (inst 'movl (compile-imm i env) 'eax)))
     (`(,(? (curry hash-has-key? *binops*) o) ,(? immediate? a) ,(? immediate? b))
+      (expect-type! 'int a)
+      (expect-type! 'int b)
       (list (inst 'movl (compile-imm a env) 'eax)
             (inst (hash-ref *binops* o) (compile-imm b env) 'eax)))
     (`(/ ,(? immediate? a) ,(? immediate? b))
+      (expect-type! 'int a)
+      (expect-type! 'int b)
       (list (inst 'movl (compile-imm a env) 'eax)
             (inst 'movl b 'ebx)
             (inst 'movl 0 'edx)
             (inst 'idiv 'ebx)))
     (`(if ,(? immediate? cond) ,then-expr ,else-expr)
+      (expect-type! 'bool cond)
       (let ((else-label (gensym 'else))
             (end-label (gensym 'end)))
         (append
@@ -195,10 +209,12 @@
           (list (inst 'movl 'eax slot))
           (compile body new-env))))
     (`(λ ,args ,body)
-      (let ((l-name (new-lambda-name)))
+      ; TODO check types of function
+      (let ((l-name (gensym 'lambda)))
        (compile-function! l-name body (env-bind-args env args))
        (list (inst 'movl (~a "$" l-name) 'eax))))
     (`(,f ,args ...)
+      ; TODO check argument types
       (append (compile f env)
               (append
                 (map (curry inst 'pushl)
@@ -210,6 +226,7 @@
         ((literal? x) (literal->string x))
         ((offset? x) (offset->string x))
         ((string? x) x)
+        ((symbol? x) (symbol->string x))
         (else
           (error "can't convert to string:" x))))
 
@@ -242,5 +259,10 @@
       (displayln "popl %ebp")
       (displayln "ret"))))
 
-(compile-function! "fir_entry" '(let f (λ (a:int) (+ a 2)) (let g:int (f 1) (+ g 3))) (list #hash()))
+(compile-function! "fir_entry" '(let f
+                                 (λ (a:int) (+ a 2))
+                                 (let g:int (f 1)
+                                  (if #t
+                                      (+ g 3)
+                                      0))) (list #hash()))
 (emit-functions)
