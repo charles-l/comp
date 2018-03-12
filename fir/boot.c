@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 
 extern int fir_entry();
 
