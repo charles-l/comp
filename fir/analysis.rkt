@@ -5,7 +5,11 @@
 (struct binding (name type))
 
 (define variable? symbol?)
-(define type? symbol?)
+(define (type? x)
+  (match x
+    ((? symbol?) #t)
+    (`(-> ,_ ...) #t)
+    (else #f)))
 (define (constant? x) (or (number? x) (char? x) (boolean? x)))
 
 (define (env-lookup env v)
@@ -27,7 +31,7 @@
                        (begin e* ... e)
                        (if e0 e1 e2)
                        (λ t (x* ...) body)
-                       (let x t c
+                       (let x t e
                         body)
                        (e0 e1 ...)))
 
@@ -37,21 +41,54 @@
                    (- (type (t))))
                  (Expr (e body)
                        (- (λ t (x* ...) body)
-                          (let x t c body))
+                          (let x t e body))
                        (+ (λ (x* ...) body)
-                          (let x c body))))
+                          (let x e body))))
 
-(define-pass type-check-and-discard-type-info : L0 (e) -> L1 ()
-             (definitions)
-             (Expr : Expr (e (env #hash())) -> Expr ()
-                   ((let ,x ,t ,c ,body)
-                    `(let ,x ,c
-                      ,(Expr body (env-add env x (binding x t)))))
-                   ((if ,e0 ,e1 ,e2)
-                    (unless (eq? (env-lookup-type env e0) 'bool)
-                      (error "if condition must be of type bool"))
-                    `(if ,(Expr e0 env) ,(Expr e1 env) ,(Expr e2 env)))))
-
+(define-pass type-check-and-discard-type-info : L0 (ir) -> L1 ()
+             (definitions
+               (define (check env x t)
+                 (let ((xt (infer x env)))
+                   (unless (equal? xt t)
+                     (error "expected" x "to be of type" t "but was" xt))
+                   xt)))
+             (infer : Expr (ir env) -> * (type)
+                    (,x (env-lookup-type env x))
+                    (,c (match c
+                          ((? number?) 'int)
+                          ((? boolean?) 'bool)
+                          ((? char?) 'char)))
+                    ((begin ,e* ... ,e) (infer e env))
+                    ; FIXME (return union type)
+                    ((if ,e0 ,e1 ,e2)
+                     (check env e0 'bool)
+                     (infer e1 env))
+                    ((λ ,t (,x* ...) ,body)
+                     (let ((env* (foldl
+                                   (lambda (c e) (env-add e (car c) (cdr c)))
+                                   env
+                                   (map (lambda (n t) (cons n (binding n t)))
+                                        x*
+                                        (drop-right (cdr t) 1)))))
+                       (check env* body (last t))
+                       t))
+                    ((let ,x ,t ,e ,body)
+                     (let ((env* (env-add env x (binding x t))))
+                       (check env* e t)
+                       (infer body env*)))
+                    ((,e0 ,e1 ...)
+                     (let ((fty (infer e0 env)))
+                       (unless (equal? (drop-right (cdr fty) 1) (map (curryr infer env) e1))
+                         (error "function has incorrect type - expecting" fty))
+                       (last fty))))
+             (Expr : Expr (ir env) -> Expr ()
+                   ((let ,x ,t ,[e] ,body)
+                    `(let ,x ,e
+                       ,(Expr body (env-add env x (binding x t)))))
+                   ((λ ,t (,x* ...) ,[body])
+                    `(λ (,x* ...) ,body)))
+             (infer ir #hash())
+             (Expr ir #hash()))
 
 (define-parser parse-L0 L0)
 
@@ -120,16 +157,15 @@
                 args)
       (printf "call *%eax\n"))))
 
-
 (emit-function
   "fir_entry"
   (unparse-L1
     (type-check-and-discard-type-info
       (parse-L0
-        '(let f (λ (x) x)
-           (let g bool #t
+        '(let f (-> int int) (λ (-> int int) (x) x)
+           (let g bool #f
              (if g
-               (f 2)
+               (f 4)
                (f 3)))))))
   '())
 
