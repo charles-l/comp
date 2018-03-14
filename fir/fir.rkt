@@ -9,6 +9,7 @@
 ; * http://web.cs.ucla.edu/~palsberg/tba/papers/dimock-muller-turbak-wells-icfp97.pdf
 ;
 ; TODO
+; * register allocation
 ; * deforestation
 ; * inlining
 ; * partial evaluation
@@ -23,9 +24,10 @@
 
 (require nanopass/base)
 (require (only-in srfi/1 iota))
-
+(require (only-in srfi/13 string-drop))
 (provide fir-compile)
 
+(define +word-size+ 4)
 (struct binding (name type))
 
 (define variable? symbol?)
@@ -69,6 +71,52 @@
                        (+ (λ (x* ...) body)
                           (let x e body))))
 
+; read input sexp, rename variables to ensure names are unique
+(define-pass α-conversion : * (e) -> L0 ()
+             (definitions
+               (define (in-env? env e)
+                 (hash-has-key? env e))
+               (define (extend-env env e)
+                 (if (in-env? env e)
+                   (hash-set env e (add1 (hash-ref env e)))
+                   (hash-set env e 0)))
+               (define (var-name env e)
+                 (string->symbol
+                   (string-append
+                     (symbol->string e)
+                     "."
+                     (number->string (hash-ref env e)))))
+               (define (maybe-beginify e)
+                 (if (= (length e) 1)
+                   (car e)
+                   (cons 'begin e)))
+               (define (Expr* e* env)
+                 (map (curryr Expr env) e*)))
+             (Expr : * (e env) -> Expr ()
+                   (match e
+                     ((? constant?) e)
+                     ((? variable?) (var-name env e))
+                     (`(begin ,exprs ...)
+                       (let ((e (Expr* exprs env)))
+                         `(begin ,(drop-right e 1) ... ,(last e))))
+                     (`(if ,a ,b ,c)
+                       `(if ,(Expr a env) ,(Expr b env) ,(Expr c env)))
+                     (`(,(or 'lambda 'λ) ,type ,args ,body ...)
+                       (when (check-duplicates args)
+                         (error "duplicate arg names"))
+                       (let ((env* (foldl
+                                     (lambda (n e) (extend-env e n))
+                                     env
+                                     args)))
+                         `(λ ,type ,args ,(Expr (maybe-beginify body) env*) ...)))
+                     (`(let ,name ,type ,val ,body ...)
+                       (let ((env* (extend-env env name)))
+                         `(let ,(var-name env* name) ,type ,(Expr val env)
+                            ,(Expr (maybe-beginify body) env*))))
+                     (`(,f ,args ...)
+                       `(,f ,(Expr* args env) ...))))
+             (Expr e (hash)))
+
 (define-pass type-check-and-discard-type-info : L0 (ir) -> L1 ()
              (definitions
                (define (check env x t)
@@ -111,10 +159,8 @@
                        ,(Expr body (env-add env x (binding x t)))))
                    ((λ ,t (,x* ...) ,[body])
                     `(λ (,x* ...) ,body)))
-             (infer ir #hash())
-             (Expr ir #hash()))
-
-(define +word-size+ 4)
+             (infer ir (hash '%add (binding '%add '(-> int int int))))
+             (Expr ir (hash '%add (binding '%add '(-> int int int)))))
 
 ;; TODO FIXME make this pass work
 (define-pass emit-asm : L1 (ir) -> * ()
@@ -165,8 +211,6 @@
                                 (printf "pushl ~a\n" (emit-immediate frame v)))
                               e1)
                     (printf "call *%eax\n"))))
-
-(define-parser parse-L0 L0)
 
 ;;; BEGIN CRAPPY x86 EMIT CODE TO BE DELETED ONCE EMIT-ASM WORKS { ;;;
 (define *function-queue* '())
@@ -226,11 +270,18 @@
         (set! *function-queue* (append *function-queue* (list (list n body args))))
         (printf "movl $~a, %eax\n" n)))
     (`(,f ,args ...)
-      (L1->x86 f env)
-      (for-each (lambda (v)
-                  (printf "pushl ~a\n" (imm->x86 v)))
-                args)
-      (printf "call *%eax\n"))))
+      (cond
+        ((eq? #\% (string-ref (symbol->string f) 0))
+         (for-each (lambda (v)
+                     (printf "pushl ~a\n" (imm->x86 v)))
+                   args)
+         (printf "call ~a\n" (string->symbol (string-drop (symbol->string f) 1))))
+        (else
+          (L1->x86 f env)
+          (for-each (lambda (v)
+                      (printf "pushl ~a\n" (imm->x86 v)))
+                    args)
+          (printf "call *%eax\n"))))))
 
 ;;; } END CRAPPY x86 EMIT CODE ;;;
 
@@ -239,6 +290,6 @@
                  ((compose
                     unparse-L1
                     type-check-and-discard-type-info
-                    parse-L0)
+                    α-conversion)
                   l) '())
   (for-each (lambda (x) (emit-function (first x) (second x) (third x))) *function-queue*))

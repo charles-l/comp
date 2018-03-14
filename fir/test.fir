@@ -1,2 +1,4 @@
 (let b bool #t
- (if b 3 2))
+ (if b
+   (%add 3 4)
+   2))
