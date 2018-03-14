@@ -24,7 +24,7 @@
 (require nanopass/base)
 (require (only-in srfi/1 iota))
 
-(provide compile)
+(provide fir-compile)
 
 (struct binding (name type))
 
@@ -233,3 +233,12 @@
       (printf "call *%eax\n"))))
 
 ;;; } END CRAPPY x86 EMIT CODE ;;;
+
+(define (fir-compile l)
+  (emit-function "fir_entry"
+                 ((compose
+                    unparse-L1
+                    type-check-and-discard-type-info
+                    parse-L0)
+                  l) '())
+  (for-each (lambda (x) (emit-function (first x) (second x) (third x))) *function-queue*))
