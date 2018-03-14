@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 
 extern int fir_entry();
 
@@ -33,6 +34,10 @@ void error(int val, int errno) {
             fprintf(stderr, "unknown err");
     }
     exit(errno);
+}
+
+int add(int a, int b) {
+    return a + b;
 }
 
 int main() {
