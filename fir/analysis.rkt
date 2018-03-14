@@ -211,14 +211,3 @@
       (printf "call *%eax\n"))))
 
 ;;; } END CRAPPY x86 EMIT CODE ;;;
-
-(define (compile l)
-  (emit-function "fir_entry"
-                 ((compose
-                    unparse-L1
-                    type-check-and-discard-type-info
-                    parse-L0)
-                  l) '())
-  (for-each (lambda (x) (emit-function (first x) (second x) (third x))) *function-queue*))
-
-(compile '(let f bool #t (if f 2 1)))
