@@ -21,254 +21,215 @@
 ; * code hoisting
 ; * loop unrolling
 
-(require sugar)
+(require nanopass/base)
+(require (only-in srfi/1 iota))
 
-(define +word-size+ 4)
-(define *regs* '(eax esp ebx edx ebp))
-(define *binops* #hash((+ . addl)
-                       (- . subl)
-                       (* . imul)))
-
-(define *tags* #hash((int . 0)
-                     (bool . 1)))
+(provide compile)
 
 (struct binding (name type))
 
-(define *functions* '())
+(define variable? symbol?)
+(define (type? x)
+  (match x
+    ((? symbol?) #t)
+    (`(-> ,_ ...) #t)
+    (else #f)))
+(define (constant? x) (or (number? x) (char? x) (boolean? x)))
 
-(define (reg? r) (memq r *regs*))
-(define env? (listof (hash/c symbol? (cons/c binding? integer?))))
-(define (literal? l) (integer? l))
-(define (offset? p)
-  (and (pair? p) (integer? (car p)) (integer? (cdr p))))
+(define (env-lookup env v)
+  (hash-ref env v (lambda () (error "not bound" v))))
 
-(define (immediate? x) (or (literal? x) (symbol? x) (boolean? x)))
+(define (env-lookup-type env v)
+  (binding-type (env-lookup env v)))
 
-(provide
-  (contract-out
-    (compile (-> (or/c list? number?) env?
-                 (listof (listof string?))))
-    (reg->string (-> reg? string?))
-    (literal->string (-> literal? string?))
-    (offset->string (-> offset? string?))
-    (env-frame-size (-> env? integer?))
-    (env-bind-local (-> env? symbol? (values env? integer?)))
-    (env-lookup (-> env? symbol? (cons/c integer? (cons/c binding? integer?))))
-    (compile-imm (-> immediate? env? list?))))
+(define env-add hash-set)
 
-(define (label s)
-  (list (string-append (->string s) ":")))
+(define-language L0
+                 (terminals
+                   (variable (x))
+                   (constant (c))
+                   (type (t)))
+                 (Expr (e body)
+                       x
+                       c
+                       (begin e* ... e)
+                       (if e0 e1 e2)
+                       (λ t (x* ...) body)
+                       (let x t e
+                        body)
+                       (e0 e1 ...)))
 
-(define (env-frame-size h)
-  (count (compose negative? cdr cdr) (hash->list h)))
+(define-language L1
+                 (extends L0)
+                 (terminals
+                   (- (type (t))))
+                 (Expr (e body)
+                       (- (λ t (x* ...) body)
+                          (let x t e body))
+                       (+ (λ (x* ...) body)
+                          (let x e body))))
 
-; TODO rename these to something saner
-(define (name:type-type n)
-  (let ((l (string-split (symbol->string n) ":")))
-   (if (= 1 (length l))
-       'any
-       (string->symbol (cadr l)))))
-(define (name:type-name n)
-  (string->symbol (car (string-split (symbol->string n) ":"))))
+(define-pass type-check-and-discard-type-info : L0 (ir) -> L1 ()
+             (definitions
+               (define (check env x t)
+                 (let ((xt (infer x env)))
+                   (unless (equal? xt t)
+                     (error "expected" x "to be of type" t "but was" xt))
+                   xt)))
+             (infer : Expr (ir env) -> * (type)
+                    (,x (env-lookup-type env x))
+                    (,c (match c
+                          ((? number?) 'int)
+                          ((? boolean?) 'bool)
+                          ((? char?) 'char)))
+                    ((begin ,e* ... ,e) (infer e env))
+                    ; FIXME (return union type)
+                    ((if ,e0 ,e1 ,e2)
+                     (check env e0 'bool)
+                     (infer e1 env))
+                    ((λ ,t (,x* ...) ,body)
+                     (let ((env* (foldl
+                                   (lambda (c e) (env-add e (car c) (cdr c)))
+                                   env
+                                   (map (lambda (n t) (cons n (binding n t)))
+                                        x*
+                                        (drop-right (cdr t) 1)))))
+                       (check env* body (last t))
+                       t))
+                    ((let ,x ,t ,e ,body)
+                     (let ((env* (env-add env x (binding x t))))
+                       (check env* e t)
+                       (infer body env*)))
+                    ((,e0 ,e1 ...)
+                     (let ((fty (infer e0 env)))
+                       (unless (equal? (drop-right (cdr fty) 1) (map (curryr infer env) e1))
+                         (error "function has incorrect type - expecting" fty))
+                       (last fty))))
+             (Expr : Expr (ir env) -> Expr ()
+                   ((let ,x ,t ,[e] ,body)
+                    `(let ,x ,e
+                       ,(Expr body (env-add env x (binding x t)))))
+                   ((λ ,t (,x* ...) ,[body])
+                    `(λ (,x* ...) ,body)))
+             (infer ir #hash())
+             (Expr ir #hash()))
 
-(define (env-bind-local env name:type)
-  (let ((slot (add1 (env-frame-size (car env))))
-        (name (name:type-name name:type))
-        )
-   (values
-     (cons (hash-set (car env) name
-                     (cons (binding name
-                                    (name:type-type name:type)) slot))
-           (cdr env))
-     (cons 0 slot))))
+(define +word-size+ 4)
 
-(define (env-lookup env name)
-  (let l ((e env) (i 0))
-   (if (null? e)
-       (error "no such binding:" name)
-       (let ((v (hash-ref (car e) name #f)))
-        (if v
-            (cons i v)
-            (l (cdr e) (add1 i)))))))
+;; TODO FIXME make this pass work
+(define-pass emit-asm : L1 (ir) -> * ()
+             (definitions
+               (define (frame-locals frame)
+                 (filter (compose positive? cdr) frame))
 
-(define (env-lookup-slot env name)
-  (let ((b (env-lookup env name)))
-   (cons (car b) (cdr (cdr b)))))
+               (define (slot-index frame e)
+                 (cdr (findf (lambda (x) (eq? (car x) e)) frame)))
 
-(define (env-lookup-type env name)
-  (binding-type (car (cdr (env-lookup env name)))))
+               (define (emit-immediate frame e)
+                 (match e
+                   ((? symbol?) (format "~a(%ebp)" (- (* +word-size+ (slot-index frame e)))))
+                   ((? number?) (format "$~a" e))
+                   ((? boolean?) (format "$~a" (if e 1 0))))))
 
-(define (env-bind-args env args)
-  (cons
-    #hash()
-    (cons (for/hash ((a args) (i (in-naturals 2)))
-            (values (name:type-name a) (cons (binding (name:type-name a) (name:type-type a)) i)))
-          env)))
+             (Expr : Expr (ir (frame '())) -> * ()
+                   (,x (printf "movl ~a, %eax\n" (emit-immediate frame x)))
+                   (,c (printf "movl ~a, %eax\n" (emit-immediate frame c)))
+                   ((begin ,e* ... ,e) (begin
+                                         (map (curryr Expr frame) e*)
+                                         (Expr e frame)))
+                   ((if ,e0 ,e1 ,e2)
+                    (let ((else-label (gensym 'else)) (end-label 'end))
+                      (Expr e0 frame)
+                      (printf "cmp $0, %eax\n")
+                      (printf "jz ~a\n" else-label)
+                      (Expr e1 frame)
+                      (printf "jmp ~a\n" end-label)
+                      (printf "~a:\n" else-label)
+                      (Expr e2 frame)
+                      (printf "~a:\n" end-label)))
+                   ((let ,x ,e ,body)
+                    (printf "subl $4, %esp\n")
+                    (Expr e frame)
+                    (let ((slot (add1 (length (frame-locals frame)))))
+                      (printf "movl %eax, ~a(%ebp)\n" (- (* +word-size+ slot)))
+                      (Expr body (cons (cons x slot) frame))))
+                   ; TODO convert lambdas to labels
+                   ; TODO/FIXME raise labels to top level so we can generate all funcs
+                   ((λ (,x* ...) ,body)
+                    (let ((n (gensym 'lambda)))
+                      ; err - do something here...
+                      (printf "movl $~a, %eax\n" n)))
+                   ((,e0 ,e1 ...)
+                    (Expr e0 frame)
+                    (for-each (lambda (v)
+                                (printf "pushl ~a\n" (emit-immediate frame v)))
+                              e1)
+                    (printf "call *%eax\n"))))
 
-(define (reg->string r)
-  (string-append "%" (symbol->string r)))
+(define-parser parse-L0 L0)
 
-(define (literal->string l)
-  (string-append "$" (number->string l)))
+;;; BEGIN CRAPPY x86 EMIT CODE TO BE DELETED ONCE EMIT-ASM WORKS { ;;;
+(define *function-queue* '())
 
-(define (offset->string o)
-  (cond ((zero? (car o)) ; in current frame
-         (string-append (number->string (- (* +word-size+ (cdr o)))) "(%ebp)"))
-        ((eq? (car o) 1) ; argument
-         (string-append (number->string (* +word-size+ (cdr o))) "(%ebp)"))
-        (else (error "unhandled offset" o))))
+(define (emit-function name body args)
+  (printf ".global ~a\n" name)
+  (printf ".type ~a @function\n" name)
+  (printf ".align 8\n")
+  (printf "~a:\n" name)
+  (printf "pushl %ebp\n")
+  (printf "movl %esp, %ebp\n")
+  (L1->x86 body (map
+                  (lambda (a i)
+                    (cons a (- i)))
+                  args
+                  (iota (length args) 2)))
+  (printf "movl %ebp, %esp\n")
+  (printf "popl %ebp\n")
+  (printf "ret\n"))
 
-; TODO: write macro to generate this
-(define *instructions* (hash
-                         'movl (match-lambda*
-                                 (`(,(or (? literal? a) (? reg? a) (? offset? a) (? string? a)) ,(or (? reg? b) (? offset? b)))
-                                   (list "movl" a b)))
-                         'addl (match-lambda*
-                                 (`(,(or (? literal? a) (? reg? a) (? offset? a)) ,(or (? reg? b)))
-                                   (list "addl" a b)))
-                         'subl (match-lambda*
-                                 (`(,(or (? literal? a) (? reg? a) (? offset? a)) ,(or (? reg? b)))
-                                   (list "subl" a b)))
-                         'imul (match-lambda*
-                                 (`(,(or (? literal? a) (? reg? a) (? offset? a)) ,(or (? reg? b)))
-                                   (list "imul" a b)))
-                         'idiv (match-lambda* ; needs divisor in %edx:%eax
-                                 (`(,(or (? literal? a) (? reg? a) (? offset? a)))
-                                   (list "idiv" a)))
-                         'call (match-lambda*
-                                 (`(,s)
-                                   (list "call" s)))
-                         'pushl (match-lambda*
-                                  (`(,s)
-                                    (list "pushl" s)))
-                         'popl (match-lambda*
-                                 (`(,s)
-                                   (list "popl" s)))))
+(define (L1->x86 expr env)
+  (define (frame-locals)
+    (filter (compose positive? cdr) env))
 
-(define (inst v . args)
-  (apply (hash-ref *instructions* v) args))
+  (define (slot-index e)
+    (cdr (findf (lambda (x) (eq? (car x) e)) env)))
 
-(define (with-tag t val)
-  (bitwise-ior (arithmetic-shift val 1)
-               (hash-ref *tags* t)))
+  (define imm? (disjoin symbol? number? boolean?))
 
-(define (compile-imm i env #:boxed (do-box? #f))
-  (define (maybe-tag t v)
-    (if do-box?
-        (with-tag t v)
-        v))
-  (match i
-    ((? symbol? s) (env-lookup-slot env s))
-    ((? literal? d) (maybe-tag 'int d))
-    ((? boolean? b) (maybe-tag 'bool (if b (arithmetic-shift 1 31) 0)))))
-
-; TODO write match macro that ensures we check every expression in the grammar
-(define (compile expr env)
-  (define (expect-type! expected val)
-    (match val
-      ((? symbol?)
-       (define valt (env-lookup-type env val))
-       (unless (eq? valt expected)
-         (error "expected variable" val "to be type" expected "but was" valt)))
-      ((? literal?)
-       (unless (eq? expected 'int) (error "unexpected literal" val)))
-      ((? boolean?)
-       (unless (eq? expected 'bool) (error "unexpected boolean" val)))))
+  (define (imm->x86 e)
+    (match e
+      ((? symbol?) (format "~a(%ebp)" (- (* +word-size+ (slot-index e)))))
+      ((? number?) (format "$~a" e))
+      ((? boolean?) (format "$~a" (if e 1 0)))))
 
   (match expr
-    ((? immediate? i)
-     (list (inst 'movl (compile-imm i env) 'eax)))
-    ;TODO combine binops with functions as primfuncs
-    (`(,(? (curry hash-has-key? *binops*) o) ,(? immediate? a) ,(? immediate? b))
-      (expect-type! 'int a)
-      (expect-type! 'int b)
-      (list (inst 'movl (compile-imm a env) 'eax)
-            (inst (hash-ref *binops* o) (compile-imm b env) 'eax)))
-    (`(/ ,(? immediate? a) ,(? immediate? b))
-      (expect-type! 'int a)
-      (expect-type! 'int b)
-      (list (inst 'movl (compile-imm a env) 'eax)
-            (inst 'movl b 'ebx)
-            (inst 'movl 0 'edx)
-            (inst 'idiv 'ebx)))
-    (`(if ,(? immediate? cond) ,then-expr ,else-expr)
-      (expect-type! 'bool cond)
-      (let ((else-label (gensym 'else))
-            (end-label (gensym 'end)))
-        (append
-          (list (inst 'movl (compile-imm cond env) 'eax))
-          '(("cmp" "$0" "%eax"))
-          `(("jz" ,else-label))
-          (compile then-expr env)
-          `(("jmp" ,end-label))
-          `(,(label else-label))
-          (compile else-expr env)
-          `(,(label end-label)))))
-    (`(let ,name:type ,val ,body)
-      (let-values (((new-env slot) (env-bind-local env name:type)))
-        (append
-          (compile val env)
-          (list (inst 'movl 'eax slot))
-          (compile body new-env))))
+    ((? imm?) (printf "movl ~a, %eax\n" (imm->x86 expr)))
+    (`(if ,imm ,then-expr ,else-expr)
+      (let ((else-label (gensym 'else)) (end-label 'end))
+        (L1->x86 imm env)
+        (printf "cmp $0, %eax\n")
+        (printf "jz ~a\n" else-label)
+        (L1->x86 then-expr env)
+        (printf "jmp ~a\n" end-label)
+        (printf "~a:\n" else-label)
+        (L1->x86 else-expr env)
+        (printf "~a:\n" end-label)))
+    (`(let ,n ,v ,body)
+      (printf "subl $4, %esp\n") ; allocate space for new value
+      (L1->x86 v env)
+      (let ((slot (add1 (length (frame-locals)))))
+        (printf "movl %eax, ~a(%ebp)\n" (- (* +word-size+ slot)))
+        (L1->x86 body (cons (cons n slot) env)))
+      )
     (`(λ ,args ,body)
-      ; TODO combine with let and name functions their var names
-      ; TODO check types of function
-      (let ((l-name (gensym 'lambda)))
-       (compile-function! l-name body (env-bind-args env args))
-       (list (inst 'movl (~a "$" l-name) 'eax))))
+      (let ((n (gensym 'lambda)))
+        (set! *function-queue* (append *function-queue* (list (list n body args))))
+        (printf "movl $~a, %eax\n" n)))
     (`(,f ,args ...)
-      ; TODO check argument types
-      (append (compile f env)
-              (append
-                (map (curry inst 'pushl)
-                     (map (curryr compile-imm env) (reverse args)))
-                (list (inst 'call "*%eax")))))))
+      (L1->x86 f env)
+      (for-each (lambda (v)
+                  (printf "pushl ~a\n" (imm->x86 v)))
+                args)
+      (printf "call *%eax\n"))))
 
-(define (asmthing->string x)
-  (cond ((reg? x) (reg->string x))
-        ((literal? x) (literal->string x))
-        ((offset? x) (offset->string x))
-        ((string? x) x)
-        ((symbol? x) (symbol->string x))
-        (else
-          (error "can't convert to string:" x))))
-
-(define (print-asm instruction)
-  (let ((instruction* (map asmthing->string instruction)))
-   (displayln
-     (cond ((= 3 (length instruction*))
-            (string-append (car instruction*)
-                           " "
-                           (string-join (cdr instruction*) ",")))
-           ((= 2 (length instruction*)) (string-join instruction* " "))
-           (else
-             (car instruction*))))))
-
-
-(struct function (name code args))
-
-(define (compile-function! name code env)
-  (println (end-expressions code))
-  (set! *functions* (cons (cons name (compile code env)) *functions*)))
-
-(define (emit-functions)
-  (for ((f *functions*))
-    (match-let (((cons name code) f))
-      (displayln (~a ".global " name))
-      (displayln (~a ".type " name " @function"))
-      (displayln ".align 8")
-      (displayln (~a name ":"))
-      (displayln "pushl %ebp")
-      (displayln "movl %esp, %ebp")
-      (map print-asm code)
-      (displayln "movl %ebp, %esp")
-      (displayln "popl %ebp")
-      (displayln "ret"))))
-
-(compile-function! "fir_entry" '(let f
-                                 (λ (a:int) (+ a 2))
-                                 (let g:int (f 1)
-                                  (if #t
-                                      (+ g 3)
-                                      0))) (list #hash()))
-(emit-functions)
+;;; } END CRAPPY x86 EMIT CODE ;;;
