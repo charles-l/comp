@@ -1,6 +1,7 @@
 #lang slideshow
 (require slideshow/text)
 (require unstable/gui/slideshow)
+(require (only-in scribble/base url))
 (require (except-in plot/pict shade))
 
 (current-main-font "Roboto Sans")
@@ -18,7 +19,7 @@
   (bold (t "How to build a programming language (WIPS)")))
 
 (slide
-  (t "What is a programming language?")
+  (bt "What is a programming language?")
   'next
   (item "Formal language")
   'next
@@ -27,7 +28,7 @@
   (item "Programmer to programmer"))
 
 (slide
-  (t "Why should you care?")
+  (bt "Why should you care?")
   'next
   (item "Reason about errors")
   'next
@@ -39,7 +40,13 @@
   (bitmap "progcat.jpg"))
 
 (slide
-  (t "Types in languages")
+  (bt "Paradigms")
+  (item "Procedural")
+  (item "Object-oriented")
+  (item "Functional"))
+
+(slide
+  (bt "Types in languages")
   (t "Dynamic vs static")
   (t "Strong vs weak"))
 
@@ -126,7 +133,7 @@
   (t "lexing is a minimal preprocessing pass"))
 
 (slide
-  (para "Parsing (with" (tt "yacc") ")"))
+  (para #:align 'center "Parsing (with" (tt "yacc") ")"))
 
 (slide
   (para (tt "yacc") "converts stream of tokens to" (italic (t "parse tree"))))
@@ -155,10 +162,12 @@
   (para "Uses " (italic "higher order functions") " to compose parser functions together"))
 
 (slide
-  (tt "parse(char, \"woot\") => 'w'")
-  (tt "parse(num, \"13\") => 3")
+  (para
+    (vl-append
+      (tt "parse(char, \"woot\") => 'w'")
+      (tt "parse(num, \"13\") => 3")))
   'next
-  (tt "parse(num, \"31\") => error ..."))
+  (para (tt "parse(num, \"31\") => error ...")))
 
 (slide
   (para (tt "parse(many(char), \"hax0r\") => \"hax\""))
@@ -171,7 +180,55 @@
   (bitmap "runaway.jpg"))
 
 (slide
+  (para "Compilers are tricky"))
+
+(slide
+  (para "Pipeline of passes"))
+
+(slide
+  (bt "Frontend")
+  (graphviz "digraph G {
+            size = \"8,8\";
+            ordering=out;
+            node [shape = box];
+            a [label=\"lex\"];
+            b [label=\"parse\"];
+            c [label=\"semantic analysis\"];
+            a -> b -> c;
+            }"))
+
+(slide
+  (bt "Backend")
+  (graphviz "digraph G {
+            size = \"8,8\";
+            ordering=out;
+            node [shape = box];
+            a [label=\"desugar\"];
+            b [label=\"partial evaluation\"];
+            c [label=\"deforestation\"];
+            d [label=\"data-flow analysis\"];
+            e [label=\"dead-code elimination\"];
+            f [label=\"code generation\"];
+            a -> b -> c -> d -> e -> f;
+            }"))
+
+(slide
   (tt "Let's build an interpreter!"))
+
+(slide
+  (para "In truth, there aren't many pure interpreters anymore"))
+
+(slide
+  (para "Most modern \"interpreters\" compile to bytecode (interpreted by a VM)"))
+
+(slide
+  (item "Java")
+  (item "Python")
+  (item "Ruby")
+  (item "JavaScript"))
+
+(slide
+  (para "Graph walking interpreters are straightforward"))
 
 (slide
   (para "An interpreter walks the tree and executes the semantic meaning dynamically"))
@@ -182,6 +239,11 @@
 
 (slide
   (bitmap "eval-apply.gif"))
+
+(slide
+  (t "metacircular evaluator")
+  'next
+  (small (t "which we're not gonna do 'cuz Lisp is special")))
 
 (slide
   (vl-append
@@ -262,11 +324,58 @@
     (tt " => 3")))
 
 (slide
+  (bt "Not that we can really do anything with it")
+  (bitmap "grumpy.jpg"))
+
+(slide
   (vl-append
     (tt "def apply(function, args):")
     (tt "  ...")
-    (tt "    new_env = [dict(zip(function.argnames, args))] + f.env")
-    (tt "    last = None")
-    (tt "    for expr in function.body:")
-    (tt "      last = eval(expr, new_env)")
-    (tt "    return last")))
+    (tt "  if is_primitive(function):")
+    (tt "    return function(*args)")
+    (blank-line)
+    (tt "eval(Call(Id('print'), 14), [{'print': print}])")
+    (tt " stdout => 14")))
+
+(slide
+  (vl-append
+    (tt "# supports recursion")
+    (tt "fib = lambda n:")
+    (tt "        if is_one(n): 1")
+    (tt "        else: n * fib(sub1(n))")
+    (tt "print(fib 10)")))
+
+(slide
+  (vl-append
+    (tt "# parses to ...")
+    (tt "prog = Begin(")
+    (tt "  Assign(Id('fac'), Lambda([Id('n')],")
+    (tt "    If(Call(Id('is_one'), Id('n')),")
+    (tt "      1,")
+    (tt "      Call(Id('*'), Id('n'), Call(Id('fac'),")
+    (tt "        Call(Id('sub1'), Id('n'))))))),")
+    (tt "  Call(Id('print'), Call(Id('fac'), 10)))")
+    (blank-line)
+    (tt "eval(prog, [{'is_one', lambda a: a == 1},")
+    (tt "            {'*', lambda a, b: a * b},")
+    (tt "            {'sub1', lambda a: a - 1},")
+    (tt "            {'print', print}])")
+    (tt "# and evals to ... ")
+    (tt " => 362880")))
+
+(slide
+  (para #:align 'center (t "It's a real programming language!") (small (t "ish")))
+  (bitmap "mindblown.jpg"))
+
+(slide
+  (t "Code available in this repo:")
+  (tt "https://github.com/charles-l/comp"))
+
+(slide
+  (bt "Further reasources")
+  (item "Structure and Interpretation of Computer Programs (The Wizard Book)")
+  (item "Types and Programming Languages")
+  (item "Paradigms of Artificial Intelligence Programming")
+  (item "Compilers: Principles, Tools, and Techniques (The Dragon Book)")
+  (item "Racket (programming language)")
+  (item "https://github.com/charles-l/capstone"))

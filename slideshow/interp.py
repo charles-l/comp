@@ -96,11 +96,9 @@ program = Begin(
             If(Call(s('one?'), s('n')),
                 1,
                 Call(s('*'), s('n'), Call(s('fac'), Call(s('sub1'), s('n'))))))),
-            Call(s('fac'), 10))
+            Call(s('print'), Call(s('fac'), 10)))
 
 v = eval(program, [{'one?': Primfun(lambda a: a == 1),
     '*': Primfun(lambda a, b: a * b),
-    'sub1': Primfun(lambda n: n - 1)}])
-
-v = eval(Call(Lambda([s('x')], s('x')), 3), [{}])
-print(v)
+    'sub1': Primfun(lambda n: n - 1),
+    'print': Primfun(print)}])
