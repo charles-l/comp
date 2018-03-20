@@ -19,7 +19,7 @@
   ((dump-asm)
    (do-compile))
   (else
-    (with-output-to-file "out.s" #:exists 'update
+    (with-output-to-file "out.s" #:exists 'replace
                          (thunk (do-compile)))
     (system "gcc -m32 boot.c out.s -o p")))
 

@@ -71,8 +71,9 @@
                        (+ (λ (x* ...) body)
                           (let x e body))))
 
-; read input sexp, rename variables to ensure names are unique
-(define-pass α-conversion : * (e) -> L0 ()
+; read input sexp, rename variables to ensure names are unique (α-conversion)
+; also desugar
+(define-pass parse-and-desugar : * (e) -> L0 ()
              (definitions
                (define (in-env? env e)
                  (hash-has-key? env e))
@@ -91,7 +92,26 @@
                    (car e)
                    (cons 'begin e)))
                (define (Expr* e* env)
-                 (map (curryr Expr env) e*)))
+                 (map (curryr Expr env) e*))
+               (with-output-language (L0 Expr)
+                                     (define (expand-let let-e env)
+                                       (match let-e
+                                         (`(let ,bindings ,body ...)
+                                           (let ((env* (foldl
+                                                         (lambda (n e) (extend-env e (car n)))
+                                                         env
+                                                         bindings)))
+                                             (define (expand-bindings b)
+                                               (match b
+                                                 ('() (Expr (maybe-beginify body) env*))
+                                                 (`((,x : ,t ,e) . ,rest)
+                                                   (unless (or (variable? x) (type? t))
+                                                     (error "let binding is invalid" `(,x : ,t)))
+                                                   `(let ,(var-name env* x) ,t ,(Expr e env)
+                                                      ,(expand-bindings rest)))))
+                                             (expand-bindings bindings)))
+                                         (else
+                                           (error "invalid let form" let-e))))))
              (Expr : * (e env) -> Expr ()
                    (match e
                      ((? constant?) e)
@@ -109,10 +129,8 @@
                                      env
                                      args)))
                          `(λ ,type ,args ,(Expr (maybe-beginify body) env*) ...)))
-                     (`(let ,name ,type ,val ,body ...)
-                       (let ((env* (extend-env env name)))
-                         `(let ,(var-name env* name) ,type ,(Expr val env)
-                            ,(Expr (maybe-beginify body) env*))))
+                     (`(let ,_ ...)
+                       (expand-let e env))
                      (`(,f ,args ...)
                        `(,f ,(Expr* args env) ...))))
              (Expr e (hash)))
@@ -249,7 +267,7 @@
   (match expr
     ((? imm?) (printf "movl ~a, %eax\n" (imm->x86 expr)))
     (`(if ,imm ,then-expr ,else-expr)
-      (let ((else-label (gensym 'else)) (end-label 'end))
+      (let ((else-label (gensym 'else)) (end-label (gensym 'end)))
         (L1->x86 imm env)
         (printf "cmp $0, %eax\n")
         (printf "jz ~a\n" else-label)
@@ -285,11 +303,12 @@
 
 ;;; } END CRAPPY x86 EMIT CODE ;;;
 
+
 (define (fir-compile l)
   (emit-function "fir_entry"
                  ((compose
                     unparse-L1
                     type-check-and-discard-type-info
-                    α-conversion)
+                    parse-and-desugar)
                   l) '())
   (for-each (lambda (x) (emit-function (first x) (second x) (third x))) *function-queue*))
