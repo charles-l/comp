@@ -25,6 +25,7 @@
 (require nanopass/base)
 (require (only-in srfi/1 iota))
 (require (only-in srfi/13 string-drop))
+(require sugar)
 (provide fir-compile)
 
 (define +word-size+ 4)
@@ -43,6 +44,12 @@
 
 (define (env-lookup-type env v)
   (binding-type (env-lookup env v)))
+
+(define (%name? s)
+  (and (variable? s) (eq? #\% (string-ref (symbol->string s) 0))))
+
+(define (clean-%name s)
+  (string-drop (symbol->string s) 1))
 
 (define env-add hash-set)
 
@@ -71,6 +78,8 @@
                        (+ (λ (x* ...) body)
                           (let x e body))))
 
+(define-language L1.1 (extends L1))
+
 ; read input sexp, rename variables to ensure names are unique (α-conversion)
 ; also desugar
 (define-pass parse-and-desugar : * (e) -> L0 ()
@@ -82,11 +91,13 @@
                    (hash-set env e (add1 (hash-ref env e)))
                    (hash-set env e 0)))
                (define (var-name env e)
-                 (string->symbol
-                   (string-append
-                     (symbol->string e)
-                     "."
-                     (number->string (hash-ref env e)))))
+                 (if (%name? e)
+                   e
+                   (string->symbol
+                     (string-append
+                       (symbol->string e)
+                       "."
+                       (number->string (hash-ref env e))))))
                (define (maybe-beginify e)
                  (if (= (length e) 1)
                    (car e)
@@ -132,7 +143,7 @@
                      (`(let ,_ ...)
                        (expand-let e env))
                      (`(,f ,args ...)
-                       `(,f ,(Expr* args env) ...))))
+                       `(,(Expr f env) ,(Expr* args env) ...))))
              (Expr e (hash)))
 
 (define-pass type-check-and-discard-type-info : L0 (ir) -> L1 ()
@@ -167,9 +178,15 @@
                        (check env* e t)
                        (infer body env*)))
                     ((,e0 ,e1 ...)
-                     (let ((fty (infer e0 env)))
-                       (unless (equal? (drop-right (cdr fty) 1) (map (curryr infer env) e1))
-                         (error "function has incorrect type - expecting" fty))
+                     (let* ((fty (infer e0 env)) (rargsty (map (curryr infer env) e1))
+                                                 (argsty (drop-right (cdr fty) 1)))
+                       (unless (equal? argsty rargsty)
+                         (error "function has incorrect type - expecting args of type"
+                                argsty
+                                "but got"
+                                rargsty
+                                "for"
+                                (cons e0 e1)))
                        (last fty))))
              (Expr : Expr (ir env) -> Expr ()
                    ((let ,x ,t ,[e] ,body)
@@ -177,8 +194,46 @@
                        ,(Expr body (env-add env x (binding x t)))))
                    ((λ ,t (,x* ...) ,[body])
                     `(λ (,x* ...) ,body)))
-             (infer ir (hash '%add (binding '%add '(-> int int int))))
-             (Expr ir (hash '%add (binding '%add '(-> int int int)))))
+             (infer ir (hash '%add (binding '%add '(-> int int int))
+                             '%gt (binding '%gt '(-> int int bool))))
+             (Expr ir (hash '%add (binding '%add '(-> int int int))
+                            '%gt (binding '%gt '(-> int int bool)))))
+
+(define-pass convert-to-anf : L1 (ir) -> L1.1 ()
+             (definitions
+               (define (value? m)
+                 (match m
+                   ((? constant?) #t)
+                   ((? variable?) #t)
+                   (else #f)))
+               (with-output-language (L1.1 Expr)
+                                     (define (maybe-normalize e gen-body)
+                                       (if (value? e)
+                                         (gen-body e)
+                                         (let ((tmp-var (gensym)))
+                                           `(let ,tmp-var ,(Expr e)
+                                              ,(gen-body tmp-var)))))
+                                     (define (maybe-normalize* e* gen-body)
+                                       (match e*
+                                         ('() (gen-body '()))
+                                         (`(,e . ,rest)
+                                           (maybe-normalize e
+                                                            (λ (t)
+                                                               (maybe-normalize* rest
+                                                                                 (λ (t*)
+                                                                                    (gen-body (cons t t*)))))))))))
+             (Expr : Expr (ir) -> Expr ()
+                   ((if ,e0 ,[e1] ,[e2])
+                    (maybe-normalize e0
+                                     (λ (v)
+                                        `(if ,v ,e1 ,e2))))
+                   ((,e0 ,e1 ...)
+                    (maybe-normalize e0 (λ (t)
+                                           (maybe-normalize* e1
+                                                             (λ (t*)
+                                                                `(,t ,t* ...))))))))
+
+
 
 ;; TODO FIXME make this pass work
 (define-pass emit-asm : L1 (ir) -> * ()
@@ -191,7 +246,7 @@
 
                (define (emit-immediate frame e)
                  (match e
-                   ((? symbol?) (format "~a(%ebp)" (- (* +word-size+ (slot-index frame e)))))
+                   ((? variable?) (format "~a(%ebp)" (- (* +word-size+ (slot-index frame e)))))
                    ((? number?) (format "$~a" e))
                    ((? boolean?) (format "$~a" (if e 1 0))))))
 
@@ -254,18 +309,22 @@
     (filter (compose positive? cdr) env))
 
   (define (slot-index e)
-    (cdr (findf (lambda (x) (eq? (car x) e)) env)))
+    (cond
+      ((findf (lambda (x) (eq? (car x) e)) env) => cdr)
+      (else (error "no slot for" e))))
 
   (define imm? (disjoin symbol? number? boolean?))
 
   (define (imm->x86 e)
     (match e
-      ((? symbol?) (format "~a(%ebp)" (- (* +word-size+ (slot-index e)))))
+      ((? %name?) (format "$~a" (clean-%name e)))
+      ((? variable?) (format "~a(%ebp)" (- (* +word-size+ (slot-index e)))))
       ((? number?) (format "$~a" e))
       ((? boolean?) (format "$~a" (if e 1 0)))))
 
   (match expr
-    ((? imm?) (printf "movl ~a, %eax\n" (imm->x86 expr)))
+    ((? imm?)
+     (printf "movl ~a, %eax\n" (imm->x86 expr)))
     (`(if ,imm ,then-expr ,else-expr)
       (let ((else-label (gensym 'else)) (end-label (gensym 'end)))
         (L1->x86 imm env)
@@ -286,28 +345,34 @@
     (`(λ ,args ,body)
       (let ((n (gensym 'lambda)))
         (set! *function-queue* (append *function-queue* (list (list n body args))))
-        (printf "movl $~a, %eax\n" n)))
+        (printf "movl $~a, %eax\n")))
     (`(,f ,args ...)
       (cond
-        ((eq? #\% (string-ref (symbol->string f) 0))
+        ((%name? f)
          (for-each (lambda (v)
                      (printf "pushl ~a\n" (imm->x86 v)))
-                   args)
-         (printf "call ~a\n" (string->symbol (string-drop (symbol->string f) 1))))
+                   (reverse args))
+         (printf "call ~a\n" (string->symbol (clean-%name f))))
         (else
           (L1->x86 f env)
           (for-each (lambda (v)
                       (printf "pushl ~a\n" (imm->x86 v)))
-                    args)
+                    (reverse args))
           (printf "call *%eax\n"))))))
 
 ;;; } END CRAPPY x86 EMIT CODE ;;;
 
-
+(require racket/pretty)
 (define (fir-compile l)
+  (pretty-print ((compose
+                   unparse-L1.1
+                   convert-to-anf
+                   type-check-and-discard-type-info
+                   parse-and-desugar) l) (current-error-port))
   (emit-function "fir_entry"
                  ((compose
-                    unparse-L1
+                    unparse-L1.1
+                    convert-to-anf
                     type-check-and-discard-type-info
                     parse-and-desugar)
                   l) '())

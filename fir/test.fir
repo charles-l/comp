@@ -1,5 +1,4 @@
-(let ((b : bool #t) (d : int 3))
-  (let ((a : int (%add d 4)))
-    (if b
-      a
-      2)))
+(let ((b : bool #f))
+  (if (%gt 2 6)
+    ((if b %add %gt) 1 3)
+    2))

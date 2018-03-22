@@ -40,6 +40,10 @@ int add(int a, int b) {
     return a + b;
 }
 
+int gt(int a, int b) {
+    return a > b;
+}
+
 int main() {
     return print_int(fir_entry());
     //return 0;
