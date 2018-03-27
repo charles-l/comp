@@ -80,6 +80,16 @@
 
 (define-language L1.1 (extends L1))
 
+(define-language L2
+                 (extends L1.1)
+                 (terminals)
+                 (Expr (e body)
+                       (- (λ (x* ...) body))
+                       (+ (lref x)) ; reference to label
+                       )
+                 (Func (l)
+                       (+ (label x (x* ...) body))))
+
 ; read input sexp, rename variables to ensure names are unique (α-conversion)
 ; also desugar
 (define-pass parse-and-desugar : * (e) -> L0 ()
@@ -139,7 +149,7 @@
                                      (lambda (n e) (extend-env e n))
                                      env
                                      args)))
-                         `(λ ,type ,args ,(Expr (maybe-beginify body) env*) ...)))
+                         `(λ ,type (,args ...) ,(Expr (maybe-beginify body) env*))))
                      (`(let ,_ ...)
                        (expand-let e env))
                      (`(,f ,args ...)
@@ -233,20 +243,32 @@
                                                              (λ (t*)
                                                                 `(,t ,t* ...))))))))
 
+(define-pass lift-lambdas : L1.1 (ir) -> L2 ()
+             (definitions
+               (with-output-language (L2 Func)
+                                     (define (lambda->func l x* body)
+                                       `(label ,l (,x* ...) ,body))))
+             (Expr : Expr (ir) -> Expr ()
+                   ((λ (,x* ...) ,body)
+                    (let ((l (gensym 'lambda)))
+                      (lambda->func l x* (Expr body))
+                      `(lref ,l)))))
 
-
-;; TODO FIXME make this pass work
-(define-pass emit-asm : L1 (ir) -> * ()
+(define-pass emit-asm : L2 (ir) -> * ()
              (definitions
                (define (frame-locals frame)
                  (filter (compose positive? cdr) frame))
 
                (define (slot-index frame e)
-                 (cdr (findf (lambda (x) (eq? (car x) e)) frame)))
+                 (cond ((findf (lambda (x) (eq? (car x) e)) frame) => cdr)
+                       (else (error "failed to get index for" e))))
 
                (define (emit-immediate frame e)
                  (match e
-                   ((? variable?) (format "~a(%ebp)" (- (* +word-size+ (slot-index frame e)))))
+                   ((? variable?)
+                    (if (%name? e)
+                      (format "$~a" (clean-%name e))
+                      (format "~a(%ebp)" (- (* +word-size+ (slot-index frame e))))))
                    ((? number?) (format "$~a" e))
                    ((? boolean?) (format "$~a" (if e 1 0))))))
 
@@ -272,108 +294,40 @@
                     (let ((slot (add1 (length (frame-locals frame)))))
                       (printf "movl %eax, ~a(%ebp)\n" (- (* +word-size+ slot)))
                       (Expr body (cons (cons x slot) frame))))
-                   ; TODO convert lambdas to labels
-                   ; TODO/FIXME raise labels to top level so we can generate all funcs
-                   ((λ (,x* ...) ,body)
-                    (let ((n (gensym 'lambda)))
-                      ; err - do something here...
-                      (printf "movl $~a, %eax\n" n)))
+                   ((lref ,x)
+                    (printf "movl $~a, %eax\n" x))
                    ((,e0 ,e1 ...)
                     (Expr e0 frame)
                     (for-each (lambda (v)
                                 (printf "pushl ~a\n" (emit-immediate frame v)))
                               e1)
-                    (printf "call *%eax\n"))))
+                    (printf "call *%eax\n")))
+             (Func : Func (l) -> * ()
+                   ((label ,x (,x* ...) ,body)
+                    (println "HELLO" (current-error-port))
+                    (printf ".global ~a\n" x)
+                    (printf ".type ~a @function\n" x)
+                    (printf ".align 8\n")
+                    (printf "~a:\n" x)
+                    (printf "pushl %ebp\n")
+                    (printf "movl %esp, %ebp\n")
+                    (Expr body
+                          (map
+                            (lambda (a i)
+                              (cons a (- i)))
+                            x*
+                            (iota (length x*) 2)))
+                    (printf "movl %ebp, %esp\n")
+                    (printf "popl %ebp\n")
+                    (printf "ret\n")))
+             (Expr ir '())
+             (Func ir))
 
-;;; BEGIN CRAPPY x86 EMIT CODE TO BE DELETED ONCE EMIT-ASM WORKS { ;;;
-(define *function-queue* '())
-
-(define (emit-function name body args)
-  (printf ".global ~a\n" name)
-  (printf ".type ~a @function\n" name)
-  (printf ".align 8\n")
-  (printf "~a:\n" name)
-  (printf "pushl %ebp\n")
-  (printf "movl %esp, %ebp\n")
-  (L1->x86 body (map
-                  (lambda (a i)
-                    (cons a (- i)))
-                  args
-                  (iota (length args) 2)))
-  (printf "movl %ebp, %esp\n")
-  (printf "popl %ebp\n")
-  (printf "ret\n"))
-
-(define (L1->x86 expr env)
-  (define (frame-locals)
-    (filter (compose positive? cdr) env))
-
-  (define (slot-index e)
-    (cond
-      ((findf (lambda (x) (eq? (car x) e)) env) => cdr)
-      (else (error "no slot for" e))))
-
-  (define imm? (disjoin symbol? number? boolean?))
-
-  (define (imm->x86 e)
-    (match e
-      ((? %name?) (format "$~a" (clean-%name e)))
-      ((? variable?) (format "~a(%ebp)" (- (* +word-size+ (slot-index e)))))
-      ((? number?) (format "$~a" e))
-      ((? boolean?) (format "$~a" (if e 1 0)))))
-
-  (match expr
-    ((? imm?)
-     (printf "movl ~a, %eax\n" (imm->x86 expr)))
-    (`(if ,imm ,then-expr ,else-expr)
-      (let ((else-label (gensym 'else)) (end-label (gensym 'end)))
-        (L1->x86 imm env)
-        (printf "cmp $0, %eax\n")
-        (printf "jz ~a\n" else-label)
-        (L1->x86 then-expr env)
-        (printf "jmp ~a\n" end-label)
-        (printf "~a:\n" else-label)
-        (L1->x86 else-expr env)
-        (printf "~a:\n" end-label)))
-    (`(let ,n ,v ,body)
-      (printf "subl $4, %esp\n") ; allocate space for new value
-      (L1->x86 v env)
-      (let ((slot (add1 (length (frame-locals)))))
-        (printf "movl %eax, ~a(%ebp)\n" (- (* +word-size+ slot)))
-        (L1->x86 body (cons (cons n slot) env)))
-      )
-    (`(λ ,args ,body)
-      (let ((n (gensym 'lambda)))
-        (set! *function-queue* (append *function-queue* (list (list n body args))))
-        (printf "movl $~a, %eax\n")))
-    (`(,f ,args ...)
-      (cond
-        ((%name? f)
-         (for-each (lambda (v)
-                     (printf "pushl ~a\n" (imm->x86 v)))
-                   (reverse args))
-         (printf "call ~a\n" (string->symbol (clean-%name f))))
-        (else
-          (L1->x86 f env)
-          (for-each (lambda (v)
-                      (printf "pushl ~a\n" (imm->x86 v)))
-                    (reverse args))
-          (printf "call *%eax\n"))))))
-
-;;; } END CRAPPY x86 EMIT CODE ;;;
-
-(require racket/pretty)
 (define (fir-compile l)
-  (pretty-print ((compose
-                   unparse-L1.1
-                   convert-to-anf
-                   type-check-and-discard-type-info
-                   parse-and-desugar) l) (current-error-port))
-  (emit-function "fir_entry"
-                 ((compose
-                    unparse-L1.1
-                    convert-to-anf
-                    type-check-and-discard-type-info
-                    parse-and-desugar)
-                  l) '())
-  (for-each (lambda (x) (emit-function (first x) (second x) (third x))) *function-queue*))
+  ((compose
+     emit-asm
+     lift-lambdas
+     convert-to-anf
+     type-check-and-discard-type-info
+     parse-and-desugar)
+   l) '())
