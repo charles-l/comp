@@ -1,5 +1,5 @@
 (let ((b : bool #f))
   (if (%gt 2 6)
-    ((if b %add (lambda (-> int int int)
-                  (a b) (%gt a b))) 1 3)
+    ((if b %add (lambda (-> int int int) (a b)
+                  (%add b a))) 1 3)
     2))

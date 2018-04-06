@@ -26,7 +26,7 @@
 (require (only-in srfi/1 iota))
 (require (only-in srfi/13 string-drop))
 (require sugar)
-(provide fir-compile)
+(provide fir-compile dump?)
 
 (define +word-size+ 4)
 (struct binding (name type))
@@ -86,9 +86,8 @@
                  (Expr (e body)
                        (- (λ (x* ...) body))
                        (+ (lref x)) ; reference to label
-                       )
-                 (Func (l)
-                       (+ (label x (x* ...) body))))
+                       (+ (label x (x* ...) body))
+                       (+ (program e* ...))))
 
 ; read input sexp, rename variables to ensure names are unique (α-conversion)
 ; also desugar
@@ -149,7 +148,7 @@
                                      (lambda (n e) (extend-env e n))
                                      env
                                      args)))
-                         `(λ ,type (,args ...) ,(Expr (maybe-beginify body) env*))))
+                         `(λ ,type (,(map (curry var-name env*) args) ...) ,(Expr (maybe-beginify body) env*))))
                      (`(let ,_ ...)
                        (expand-let e env))
                      (`(,f ,args ...)
@@ -248,14 +247,18 @@
 
 (define-pass lift-lambdas : L1.1 (ir) -> L2 ()
              (definitions
-               (with-output-language (L2 Func)
-                                     (define (lambda->func l x* body)
-                                       `(label ,l (,x* ...) ,body))))
+               (define *fs* '())
+               (with-output-language (L2 Expr)
+                                     (define (make-func! l x* body)
+                                       (set! *fs*
+                                         (cons `(label ,l (,x* ...) ,body) *fs*)))))
              (Expr : Expr (ir) -> Expr ()
                    ((λ (,x* ...) ,body)
                     (let ((l (gensym 'lambda)))
-                      (lambda->func l x* (Expr body))
-                      `(lref ,l)))))
+                      (make-func! l x* (Expr body))
+                      `(lref ,l))))
+             (let ((e (Expr ir)))
+               `(program (label fir_entry () ,e) ,*fs* ...)))
 
 (define-pass emit-asm : L2 (ir) -> * ()
              (definitions
@@ -282,7 +285,7 @@
                                          (map (curryr Expr frame) e*)
                                          (Expr e frame)))
                    ((if ,e0 ,e1 ,e2)
-                    (let ((else-label (gensym 'else)) (end-label 'end))
+                    (let ((else-label (gensym 'else)) (end-label (gensym 'end)))
                       (Expr e0 frame)
                       (printf "cmp $0, %eax\n")
                       (printf "jz ~a\n" else-label)
@@ -304,8 +307,7 @@
                     (for-each (lambda (v)
                                 (printf "pushl ~a\n" (emit-immediate frame v)))
                               e1)
-                    (printf "call *%eax\n")))
-             (Func : Func (l) -> * ()
+                    (printf "call *%eax\n"))
                    ((label ,x (,x* ...) ,body)
                     (printf ".global ~a\n" x)
                     (printf ".type ~a @function\n" x)
@@ -321,15 +323,29 @@
                             (iota (length x*) 2)))
                     (printf "movl %ebp, %esp\n")
                     (printf "popl %ebp\n")
-                    (printf "ret\n")))
-             (Expr ir '())
-             (Func ir))
+                    (printf "ret\n"))
+                   ((program ,e* ...)
+                    (for-each (curryr Expr frame) e*)))
+             (Expr ir '()))
+
+(define dump? (make-parameter #f))
+
+(define-syntax (maybe-dump stx)
+  (syntax-case stx ()
+    ((_ unparse transform)
+     #'(if (dump?)
+         (lambda (f)
+           (let ((r (transform f)))
+             (println (quote transform))
+             (println (unparse r))
+             r))
+         transform))))
 
 (define (fir-compile l)
   ((compose
      emit-asm
-     lift-lambdas
-     convert-to-anf
-     type-check-and-discard-type-info
-     parse-and-desugar)
+     (maybe-dump unparse-L2   lift-lambdas)
+     (maybe-dump unparse-L1.1 convert-to-anf)
+     (maybe-dump unparse-L1   type-check-and-discard-type-info)
+     (maybe-dump unparse-L0   parse-and-desugar))
    l) '())

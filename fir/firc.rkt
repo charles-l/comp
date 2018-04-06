@@ -8,7 +8,7 @@
 (define f
   (command-line
     #:program "compiler"
-    #:once-each (("-d") "dump assembly to stdout rather than compiling with gcc" (dump-asm #t))
+    #:once-each (("-d") "dump each pass and assembly to stdout rather than compiling with gcc" (dump-asm #t))
     #:args (filename)
     filename))
 
@@ -17,7 +17,8 @@
 
 (cond
   ((dump-asm)
-   (do-compile))
+   (parameterize ((dump? #t))
+     (do-compile)))
   (else
     (with-output-to-file "out.s" #:exists 'replace
                          (thunk (do-compile)))
